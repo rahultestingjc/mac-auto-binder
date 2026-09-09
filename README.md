@@ -180,7 +180,7 @@ bash tests/test-units.sh
 bash tests/test-flow.sh
 ```
 
-- `test-units.sh` — 51 assertions: JSON escaping, email masking, user
+- `test-units.sh` — 57 assertions: JSON escaping, email masking, user
   lookup parsing, 5xx retry, username alignment (case-insensitive
   compare, original case sent), 409-as-success, every failure category,
   defer/completion state, the renderer-result parser, and the credential helper's status tokens.

@@ -218,6 +218,91 @@ json_field '{"fields":{}}' password >/dev/null
 assert_eq "$?" "1" 'absent key reports failure'
 rm -f "$JF"
 
+printf '\n--- renderer exit-code contract ---\n'
+# lib/ui.sh and user/verify-credentials.sh tell the buttons apart by EXIT
+# STATUS, not by parsing stdout. The renderer once exited 0 for BOTH
+# buttons, so every secondary button ("Remind Me Later", "I'll Sign Out
+# Later", "Close", "Back") was read as the primary one. Lock the mapping
+# against the real lib/jc-ui.js, with the modal and the order-front calls
+# patched out so nothing appears on screen.
+if [[ "$(uname)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
+    RT="$(mktemp -d)"
+    rt_run() {   # rt_run <modal-return-code> -> exit status of the renderer
+        awk -v c="$1" '
+            index($0,"runModalForWindow") && index($0,"var code") { print "  var code = " c ";"; next }
+            index($0,"win.makeKeyAndOrderFront")                  { next }
+            index($0,"activateIgnoringOtherApps")                 { next }
+            { print }' "$ROOT/lib/jc-ui.js" > "$RT/ui.js"
+        osascript -l JavaScript "$RT/ui.js" \
+            '{"company":"T","title":"T","button1":"One","button2":"Two"}' >/dev/null 2>&1
+        printf '%s' "$?"
+    }
+    assert_eq "$(rt_run 0)"     "0" 'button1 exits 0'
+    assert_eq "$(rt_run 1)"     "1" 'button2 exits 1 (Remind Me Later / Sign Out Later / Back)'
+    assert_eq "$(rt_run -1000)" "2" 'dismissed window exits 2'
+    rm -rf "$RT"
+else
+    printf '  SKIP  renderer exit-code contract (needs macOS + osascript)\n'
+fi
+
+printf '\n--- progress window is killed, not just its wrapper ---\n'
+# ui_progress_start goes through `launchctl asuser`, which FORKS: $! is a
+# wrapper, not the process drawing the window. Killing only the wrapper left
+# the "Linking your account..." window up for the rest of the session.
+if [[ "$(uname)" == "Darwin" ]]; then
+    PSTUB="$(mktemp -d)"
+    cat > "$PSTUB/launchctl" <<'STUB'
+#!/bin/bash
+[[ "${1:-}" == "asuser" ]] && shift 2
+"$@" &
+wait $!
+STUB
+    cat > "$PSTUB/sudo" <<'STUB'
+#!/bin/bash
+[[ "${1:-}" == "-u" ]] && shift 2
+exec "$@"
+STUB
+    cat > "$PSTUB/osascript" <<'STUB'
+#!/bin/bash
+exec sleep 30
+STUB
+    chmod +x "$PSTUB"/*
+    . "$ROOT/lib/ui.sh"
+    LIB_DIR="$ROOT/lib"
+    CONSOLE_USER="$(id -un)"; CONSOLE_UID="$(id -u)"
+    COMPANY_NAME="Test"; ACCENT_COLOR="#0E8A5F"
+    ui_init >/dev/null 2>&1
+    SAVED_PATH="$PATH"; PATH="$PSTUB:$PATH"
+    ui_progress_start "Linking your account to this Mac..."
+    i=0
+    while (( i < 40 )); do
+        [[ -s "${UI_PROGRESS_PIDFILE:-/nonexistent}" ]] && break
+        sleep 0.1; i=$((i + 1))
+    done
+    PROG_PID="$(cat "$UI_PROGRESS_PIDFILE" 2>/dev/null)"
+    WRAP_PID="$UI_PROGRESS_PID"
+    if [[ "$PROG_PID" =~ ^[0-9]+$ ]]; then
+        assert true 'renderer PID is recorded'
+    else
+        assert false 'renderer PID is recorded'
+    fi
+    [[ -n "$PROG_PID" && "$PROG_PID" != "$WRAP_PID" ]] && \
+        assert true 'wrapper PID differs from the renderer PID (as on a real Mac)' || \
+        assert false 'wrapper PID differs from the renderer PID (as on a real Mac)'
+    ui_progress_stop
+    sleep 0.4
+    if kill -0 "$PROG_PID" 2>/dev/null; then
+        kill -9 "$PROG_PID" 2>/dev/null
+        assert false 'progress window process is gone after ui_progress_stop'
+    else
+        assert true 'progress window process is gone after ui_progress_stop'
+    fi
+    PATH="$SAVED_PATH"
+    rm -rf "$PSTUB"
+else
+    printf '  SKIP  progress-window kill (needs macOS)\n'
+fi
+
 printf '\n--- credential helper: simulation tokens ---\n'
 # The helper now renders through lib/jc-ui.js via `osascript`, so the stub
 # speaks the renderer's JSON protocol and is placed on PATH (the helper

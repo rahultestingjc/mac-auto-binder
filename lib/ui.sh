@@ -19,6 +19,7 @@
 UI_PROGRESS_PID=""
 UI_RENDERER=""
 UI_LAST_JSON=""
+UI_PROGRESS_PIDFILE=""
 
 ui_as_user() {
     launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" "$@"
@@ -82,8 +83,21 @@ ui_render() {
 ui_progress_start() {
     local msg="$1" spec
     ui_progress_stop
+
+    # `launchctl asuser` FORKS, so $! is a wrapper PID, not the process that
+    # owns the window - killing it left the progress window on screen for the
+    # rest of the session. Have the console-user shell record its own PID and
+    # then `exec` the renderer in place, so the file holds the PID that
+    # actually draws the window. (The stubs in tests/ use exec, which is why
+    # the old code passed there and failed on a real Mac.)
+    UI_PROGRESS_PIDFILE="$(mktemp /private/tmp/jc_prog.XXXXXX)"
+    chmod 644 "$UI_PROGRESS_PIDFILE" 2>/dev/null || true
+    chown "$CONSOLE_USER" "$UI_PROGRESS_PIDFILE" 2>/dev/null || true
+
     spec="{$(ui_common_json),\"screen\":\"progress\",\"title\":\"$(ui_esc "$msg")\",\"message\":\"This usually takes less than a minute. Please keep this window open.\"}"
-    ui_as_user osascript -l JavaScript "$UI_RENDERER" "$spec" >/dev/null 2>&1 &
+    # osascript stays unqualified so tests can stub it.
+    ui_as_user /bin/bash -c 'printf "%s" "$$" > "$1"; exec osascript -l JavaScript "$2" "$3"' \
+        jc-progress "$UI_PROGRESS_PIDFILE" "$UI_RENDERER" "$spec" >/dev/null 2>&1 &
     UI_PROGRESS_PID=$!
 }
 
@@ -93,6 +107,22 @@ ui_progress_update() {
 }
 
 ui_progress_stop() {
+    local pid waited=0
+    if [[ -n "${UI_PROGRESS_PIDFILE:-}" ]]; then
+        # A very fast step can finish before the helper has written its PID.
+        while (( waited < 20 )); do
+            [[ -s "$UI_PROGRESS_PIDFILE" ]] && break
+            kill -0 "${UI_PROGRESS_PID:-0}" 2>/dev/null || break
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+        pid="$(head -n1 "$UI_PROGRESS_PIDFILE" 2>/dev/null)"
+        if [[ "$pid" =~ ^[0-9]+$ ]]; then
+            kill "$pid" >/dev/null 2>&1 || true
+        fi
+        rm -f "$UI_PROGRESS_PIDFILE" 2>/dev/null || true
+        UI_PROGRESS_PIDFILE=""
+    fi
     [[ -z "${UI_PROGRESS_PID:-}" ]] && return 0
     kill "$UI_PROGRESS_PID" >/dev/null 2>&1 || true
     wait "$UI_PROGRESS_PID" 2>/dev/null || true

@@ -79,7 +79,7 @@ Root serves that lookup inside `run_credentials_step` in `jc-enroll.sh`
 
 First bring-up on real Mac hardware is done. Both suites are green:
 
-- `tests/test-units.sh` — 51 pass / 0 fail
+- `tests/test-units.sh` — 57 pass / 0 fail
 - `tests/test-flow.sh`  — 31 pass / 0 fail
 - `bash build/build-package.sh` passes (runs both suites + the CR gate)
 
@@ -121,6 +121,25 @@ Later" and any binding failure aborted the script instead of reaching
 truncated any password containing `"` or `\` (the renderer escapes both),
 so correct passwords failed the LDAP bind. It now walks the value and
 undoes the escapes, in pure bash 3.2.
+
+Found by clicking through the real flow (both invisible to the suites as
+they were written, because the stubs modelled the *documented* contract
+rather than the shipped behaviour):
+
+7. `lib/jc-ui.js` exited **0 for both buttons** (`result.button < 0 ? 2 : 0`),
+   but `lib/ui.sh` and `user/verify-credentials.sh` tell the buttons apart
+   by exit status. Every secondary button - "Remind Me Later", "I'll Sign
+   Out Later", "Close", "Back" - was therefore read as the primary one, so
+   deferring still walked into the credential screen and "Sign Out Later"
+   took the sign-out branch. The exit code now carries the button index.
+   `tests/test-units.sh` locks the mapping against the real renderer.
+8. `ui_progress_start` stored `$!`, which is the `launchctl asuser`
+   wrapper. That command FORKS, so `kill` never reached the `osascript`
+   drawing the window and "Linking your account..." stayed on screen for
+   the rest of the session. The console-user shell now records its own PID
+   and `exec`s the renderer in place, so the pidfile holds the process that
+   owns the window. The `launchctl` stub in `tests/` forks too, since the
+   old `exec` stub collapsed all three processes into one PID and hid this.
 
 ### Still unverified
 

@@ -59,11 +59,15 @@ cat > "$STUBS/sysadminctl" <<'EOF'
 printf '%s\n' "${STUB_TOKEN_STATUS:-_jumpcloudserviceaccount: Secure Token is ENABLED}" >&2
 EOF
 
-# launchctl asuser <uid> <cmd...>  -> just run <cmd...>
+# launchctl asuser <uid> <cmd...>  -> run <cmd...> in a CHILD process.
+# The real launchctl asuser forks, so the pid the caller backgrounds is a
+# wrapper, not the process that ends up owning the window. Modelling that
+# here is what makes the progress-window kill path testable.
 cat > "$STUBS/launchctl" <<'EOF'
 #!/bin/bash
 [[ "${1:-}" == "asuser" ]] && shift 2
-exec "$@"
+"$@" &
+wait $!
 EOF
 
 # sudo -u <user> <cmd...> -> run <cmd...>
@@ -80,7 +84,7 @@ cat > "$STUBS/osascript" <<'EOF'
 # must NOT consume a queue entry, or the queue desyncs.
 for a in "$@"; do
     case "$a" in
-        *'"screen":"progress"'*) sleep 30; exit 0 ;;
+        *'"screen":"progress"'*) exec sleep 30 ;;
     esac
 done
 q="${STUB_OSA_QUEUE:-/dev/null}"

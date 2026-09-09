@@ -43,7 +43,7 @@ LDAP_HOST="ldap.jumpcloud.com"         # rarely changed
 LDAP_PORT=636                          # 636 = LDAPS, 389 = StartTLS
 REQUIRE_SECURE_TOKEN=1                 # gate on the JC service account
 SHOW_BLOCKED_SCREEN=0                  # 1 = tell the user when blocked
-PACKAGE_URL=""               # https:// URL of the zip. Leave
+PACKAGE_URL="https://raw.githubusercontent.com/rahultestingjc/mac-auto-binder/main/dist/JumpCloudEnrollment-macOS.zip"               # https:// URL of the zip. Leave
                                        # empty to require an attachment.
 # ================================================================
 

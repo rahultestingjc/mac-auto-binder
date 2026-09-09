@@ -199,7 +199,7 @@ while true; do
     LINKING)
         jc_info "State -> LINKING"
         ui_progress_start "Linking your account to this Mac..."
-        BIND_FAIL_REASON="$(jc_run_binding_pipeline "$JC_USER_ID" "$JC_USERNAME" "$CONSOLE_USER" "$EMAIL")"
+        BIND_FAIL_REASON="$(jc_run_binding_pipeline "$JC_USER_ID" "$JC_USERNAME" "$CONSOLE_USER" "$EMAIL" "${JC_SYSTEM_USERNAME:-}")"
         rc=$?
         ui_progress_stop
         if [[ $rc -eq 0 ]]; then

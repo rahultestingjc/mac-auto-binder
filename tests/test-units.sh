@@ -187,6 +187,67 @@ out="$(jc_run_binding_pipeline "u1" "someoneelse" "jdoe" "j@x.io" 2>/dev/null)"
 assert_eq "$?" "0" 'succeeds after aligning username'
 assert_eq "$(mock_calls)" "3" 'update + associate + primary'
 
+printf '\n--- systemUsername decides alignment; username is only the fallback ---\n'
+# The field written is ALWAYS systemUsername (never username, which the LDAP
+# DN depends on). The field COMPARED is systemUsername when the account has
+# one, falling back to username only when it is unset.
+MOCK_HANDLER=route_ok
+
+# systemUsername already matches the console user -> nothing to write, even
+# though username differs. Comparing username alone would have written.
+mock_reset
+out="$(jc_run_binding_pipeline "u1" "someoneelse" "jdoe" "j@x.io" "jdoe" 2>/dev/null)"
+assert_eq "$?" "0" 'succeeds when systemUsername already matches'
+assert_eq "$(mock_calls)" "2" 'no write when systemUsername already matches (associate + primary)'
+
+# systemUsername is stale -> write, even though username matches the console
+# user. This is the case the old username-only compare silently skipped.
+mock_reset
+out="$(jc_run_binding_pipeline "u1" "jdoe" "jdoe" "j@x.io" "someoneelse" 2>/dev/null)"
+assert_eq "$?" "0" 'succeeds after refreshing a stale systemUsername'
+assert_eq "$(mock_calls)" "3" 'stale systemUsername IS written even when username matches'
+
+# No systemUsername on the account -> fall back to comparing username.
+mock_reset
+out="$(jc_run_binding_pipeline "u1" "jdoe" "jdoe" "j@x.io" "" 2>/dev/null)"
+assert_eq "$(mock_calls)" "2" 'falls back to username when systemUsername is unset (match)'
+mock_reset
+out="$(jc_run_binding_pipeline "u1" "someoneelse" "jdoe" "j@x.io" "" 2>/dev/null)"
+assert_eq "$(mock_calls)" "3" 'falls back to username when systemUsername is unset (differs)'
+
+# Whatever the comparison, the write targets systemUsername with the
+# unmodified console username.
+mock_reset
+out="$(jc_run_binding_pipeline "u1" "jdoe" "JDoe.Local" "j@x.io" "stale" 2>/dev/null)"
+# mock_last is the FINAL call (primary user); the write we care about is the
+# PUT to /api/systemusers, so look for that one specifically.
+SYSUSER_CALL="$(grep 'systemusers/u1' "$MOCK_LOG" | tail -n1)"
+case "$SYSUSER_CALL" in
+    *'"systemUsername":"JDoe.Local"'*) assert true  'writes systemUsername with the console user, case preserved' ;;
+    *)                                 assert false 'writes systemUsername with the console user, case preserved' ;;
+esac
+case "$SYSUSER_CALL" in
+    *'"username"'*) assert false 'never writes the username field (the LDAP DN needs it)' ;;
+    *)              assert true  'never writes the username field (the LDAP DN needs it)' ;;
+esac
+
+printf '\n--- the lookup reads systemUsername too ---\n'
+mock_sysuser() {
+    MOCK_CODE=200
+    MOCK_BODY='{"results":[{"_id":"0123456789abcdef01234567","username":"varun","systemUsername":"rahuljcw","email":"varun@mylab.com"}]}'
+}
+MOCK_HANDLER=mock_sysuser
+jc_find_user_by_email "varun@mylab.com" >/dev/null 2>&1
+assert_eq "$JC_USERNAME"        "varun"    'username still parsed (LDAP DN)'
+assert_eq "$JC_SYSTEM_USERNAME" "rahuljcw" 'systemUsername parsed'
+mock_nullsys() {
+    MOCK_CODE=200
+    MOCK_BODY='{"results":[{"_id":"0123456789abcdef01234567","username":"varun","systemUsername":null,"email":"v@x.io"}]}'
+}
+MOCK_HANDLER=mock_nullsys
+jc_find_user_by_email "v@x.io" >/dev/null 2>&1
+assert_eq "$JC_SYSTEM_USERNAME" "" 'a null systemUsername reads as unset, not the string null'
+
 printf '\n--- association 409 counts as success ---\n'
 route_409() {
     MOCK_CODE=200; MOCK_BODY='{}'

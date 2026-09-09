@@ -104,7 +104,7 @@ Root serves that lookup inside `ui_credentials_step` in `lib/ui.sh`
 
 First bring-up on real Mac hardware is done. Both suites are green:
 
-- `tests/test-units.sh` — 78 pass / 0 fail
+- `tests/test-units.sh` — 89 pass / 0 fail
 - `tests/test-flow.sh`  — 34 pass / 0 fail
 - `bash build/build-package.sh` passes (runs both suites + the CR gate)
 

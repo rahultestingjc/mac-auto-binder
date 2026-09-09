@@ -206,7 +206,7 @@ bash tests/test-units.sh
 bash tests/test-flow.sh
 ```
 
-- `test-units.sh` — 78 assertions: JSON escaping, email masking, user
+- `test-units.sh` — 89 assertions: JSON escaping, email masking, user
   lookup parsing, 5xx retry, username alignment (case-insensitive
   compare, original case sent), 409-as-success, every failure category,
   the renderer-result parser, the user lookup, and the host's status tokens.

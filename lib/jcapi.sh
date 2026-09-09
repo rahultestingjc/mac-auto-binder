@@ -66,6 +66,9 @@ jc_curl() {
 # ---------------------------------------------------------------------
 JC_USER_ID=""
 JC_USERNAME=""
+# The local account name JumpCloud binds to on the device. May be unset on a
+# fresh account, where JumpCloud derives it from username.
+JC_SYSTEM_USERNAME=""
 jc_find_user_by_email() {
     local email="$1"
     jc_build_headers
@@ -95,6 +98,12 @@ jc_find_user_by_email() {
         | sed -n -E 's/.*"_id"[[:space:]]*:[[:space:]]*"([0-9a-fA-F]{24})".*/\1/p' | head -n1)"
     JC_USERNAME="$(printf '%s' "$CURL_BODY" | tr ',' '\n' \
         | sed -n -E 's/.*"username"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1)"
+    # systemUsername is the field the binding step writes, so it is also the
+    # field worth comparing against. An unset one is `"systemUsername":null`,
+    # which does not match this quoted-string pattern, so it comes back empty
+    # and the caller falls back to username.
+    JC_SYSTEM_USERNAME="$(printf '%s' "$CURL_BODY" | tr ',' '\n' \
+        | sed -n -E 's/.*"systemUsername"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1)"
 
     if [[ -z "$JC_USER_ID" ]]; then
         jc_warn "No JumpCloud user matches that email"
@@ -227,7 +236,10 @@ jc_set_primary_user() {
 # ---------------------------------------------------------------------
 jc_run_binding_pipeline() {
     local user_id="$1" jc_username="$2" local_user="$3" email="$4"
-    local local_l jc_l
+    # Optional 5th arg: the account's current systemUsername. Falls back to
+    # the global the lookup filled in, so older call sites keep working.
+    local jc_system_username="${5:-${JC_SYSTEM_USERNAME:-}}"
+    local local_l cur_l current
 
     if [[ -n "${SIMULATE_BINDING:-}" && "${JC_DRY_RUN}" == "1" ]]; then
         jc_warn "Binding simulation active: ${SIMULATE_BINDING}"
@@ -238,19 +250,28 @@ jc_run_binding_pipeline() {
         esac
     fi
 
+    # Compare against systemUsername when the account has one: that is the
+    # field this step writes, so it is the one that decides whether a write
+    # is needed. Fall back to username only when systemUsername is unset (a
+    # fresh account, where JumpCloud derives it from username). Comparing
+    # against username alone used to skip the update whenever username
+    # happened to match the console user, leaving a stale systemUsername.
+    current="${jc_system_username:-$jc_username}"
     local_l="$(printf '%s' "$local_user" | jc_lower)"
-    jc_l="$(printf '%s' "$jc_username" | jc_lower)"
+    cur_l="$(printf '%s' "$current" | jc_lower)"
 
-    # Case-insensitive compare decides IF an update is needed; the value
-    # actually sent is always the unmodified console username.
-    if [[ "$local_l" != "$jc_l" ]]; then
-        jc_info "Usernames differ (local='${local_user}' jc='${jc_username}') - aligning"
+    # Case-insensitive compare decides IF a write is needed; the value
+    # actually sent is always the unmodified console username, and the field
+    # written is always systemUsername (never username, which the LDAP DN
+    # depends on).
+    if [[ "$local_l" != "$cur_l" ]]; then
+        jc_info "systemUsername differs (local='${local_user}' current='${current}') - aligning"
         if ! jc_update_system_username "$user_id" "$local_user" "$email"; then
             printf 'USERNAME_ALIGNMENT_FAILED'
             return 1
         fi
     else
-        jc_info "Usernames match; no alignment needed"
+        jc_info "systemUsername already matches the console user; no alignment needed"
     fi
 
     if ! jc_associate_user_system "$user_id" "$SYSTEM_ID"; then

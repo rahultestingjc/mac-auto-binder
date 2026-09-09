@@ -45,7 +45,7 @@ PACKAGE_URL="https://raw.githubusercontent.com/rahultestingjc/mac-auto-binder/ma
                                        # empty to require an attachment.
 # ================================================================
 
-ZIP_SHA256="80bdf26dadd755c01ad7a5a3b3791ed0ab8b7ffac792c23fe991005570f59d56"
+ZIP_SHA256="09b1f5144ff918e88b202135b834c99c2ff7ae419dfffd9270016041bf72b7f7"
 ZIP_NAME="JumpCloudEnrollment-macOS.zip"
 APP_DIR="/Library/Application Support/JumpCloudEnrollment/app"
 

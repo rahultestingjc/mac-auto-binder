@@ -186,17 +186,31 @@ assert_contains "$out" "sign out later"          "records sign-out-later choice"
 assert_contains "$out" "us\*\*@acme.io"          "email is masked in the log"
 assert_not_contains "$out" "user@acme.io"        "raw email never logged unmasked"
 
-printf '\n--- defer from welcome ---\n'
-FLOW_STATE_DIR="${WORK}/state_defer"
-out="$(run_flow "1:")"
-assert_contains "$out" "State -> DEFERRED"       "welcome secondary button defers"
-assert_contains "$out" "Status: Deferred"        "reports Deferred"
-if [[ -f "$FLOW_STATE_DIR/defer_until" ]]; then
-    PASS=$((PASS+1)); printf '  PASS  defer_until recorded
-'
+printf '\n--- closing the welcome window just ends the run ---\n'
+# There is no "Remind Me Later" and no defer state. Dismissing the window
+# ends this run; nothing on disk suppresses the next one.
+FLOW_STATE_DIR="${WORK}/state_closed"
+out="$(run_flow "2:")"
+assert_contains "$out" "State -> CLOSED"        "a dismissed welcome closes the run"
+assert_not_contains "$out" "State -> CREDENTIALS" "no credential prompt after dismissing"
+assert_not_contains "$out" "Status: Deferred"   "no defer status is reported"
+if [[ -e "$FLOW_STATE_DIR/defer_until" || -e "$FLOW_STATE_DIR/defer_count" || -e "$FLOW_STATE_DIR/completed" ]]; then
+    FAIL=$((FAIL+1)); printf '  FAIL  no state files are written\n'
 else
-    FAIL=$((FAIL+1)); printf '  FAIL  defer_until recorded
-'
+    PASS=$((PASS+1)); printf '  PASS  no state files are written\n'
+fi
+unset FLOW_STATE_DIR
+
+printf '\n--- a completed enrollment leaves no marker behind ---\n'
+# Only primary_user_id decides whether to run, so success must not write a
+# local "completed" file that would suppress a later, legitimate run.
+FLOW_STATE_DIR="${WORK}/state_done"
+out="$(run_flow "0:" "0:{\"button\":0,\"fields\":{\"email\":\"user@acme.io\",\"password\":\"pw\"}}" "1:")"
+assert_contains "$out" "Status: Good"           "happy path still completes"
+if [[ -e "$FLOW_STATE_DIR/completed" ]]; then
+    FAIL=$((FAIL+1)); printf '  FAIL  success writes no completion marker\n'
+else
+    PASS=$((PASS+1)); printf '  PASS  success writes no completion marker\n'
 fi
 unset FLOW_STATE_DIR
 
@@ -214,7 +228,7 @@ assert_not_contains "$out" "not-an-email"       "malformed email never reaches r
 assert_contains "$out" "go\\*\\*@acme.io"          "corrected email is captured (masked)"
 assert_contains "$out" "State -> SUCCESS"        "recovers after correcting the email"
 
-printf '\n--- wrong password -> AUTH_FAILED -> defer ---\n'
+printf '\n--- wrong password -> AUTH_FAILED -> close ---\n'
 SIM_LDAP=invalid SIM_BIND=success
 out="$(run_flow "0:" "0:{\"button\":0,\"fields\":{\"email\":\"user@acme.io\",\"password\":\"pw\"}}" "1:")"
 assert_contains "$out" "State -> AUTH_FAILED"    "bad credentials reach AUTH_FAILED"

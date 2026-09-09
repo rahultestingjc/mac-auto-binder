@@ -71,11 +71,15 @@ jc_find_user_by_email() {
     jc_build_headers
     jc_info "Looking up JumpCloud user for $(jc_mask_email "$email")"
 
+    # NO `fields` projection. It used to be sent as three separate
+    # `fields=` params; JumpCloud takes a single space-separated list, so
+    # the server honoured only one and the reply came back WITHOUT _id and
+    # username. That made every lookup miss, root answered NONE, and the
+    # user was told their (correct) credentials could not be verified -
+    # the LDAP bind was never even attempted. Asking for the whole record
+    # cannot go wrong the same way.
     jc_curl -G "${JC_BASE}/api/systemusers" \
         --data-urlencode "filter=email:eq:${email}" \
-        --data-urlencode "fields=_id" \
-        --data-urlencode "fields=username" \
-        --data-urlencode "fields=email" \
         "${JC_HDR[@]}"
 
     if ! [[ "$CURL_CODE" =~ ^2 ]]; then
@@ -83,13 +87,22 @@ jc_find_user_by_email() {
         return 2
     fi
 
-    JC_USER_ID="$(printf '%s' "$CURL_BODY" \
+    # Split on commas first: a greedy .* across the whole body would jump
+    # between fields and, in a full record, pick up a nested _id instead of
+    # the record's own. One field per line keeps each match local, and
+    # head -n1 takes the first result rather than the last.
+    JC_USER_ID="$(printf '%s' "$CURL_BODY" | tr ',' '\n' \
         | sed -n -E 's/.*"_id"[[:space:]]*:[[:space:]]*"([0-9a-fA-F]{24})".*/\1/p' | head -n1)"
-    JC_USERNAME="$(printf '%s' "$CURL_BODY" \
+    JC_USERNAME="$(printf '%s' "$CURL_BODY" | tr ',' '\n' \
         | sed -n -E 's/.*"username"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1)"
 
     if [[ -z "$JC_USER_ID" ]]; then
         jc_warn "No JumpCloud user matches that email"
+        return 1
+    fi
+    if [[ -z "$JC_USERNAME" ]]; then
+        # The LDAP DN is built from the username, so this cannot proceed.
+        jc_error "JumpCloud user ${JC_USER_ID} has no username in the API reply"
         return 1
     fi
     jc_info "Resolved JC user_id=${JC_USER_ID} username=${JC_USERNAME}"

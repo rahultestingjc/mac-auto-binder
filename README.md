@@ -19,8 +19,7 @@ explicit state machine.
 
 ## What the user sees
 
-1. **Welcome** — why linking matters. *Link My JumpCloud Account* /
-   *Remind Me Later*.
+   *Link My JumpCloud Account*. Closing the window just ends this run.
 2. **Verify your JumpCloud account** — one screen collecting work email
    **and** password together (Windows parity), with show/hide on the
    password and a *← Back* link. Format errors appear inline on the same
@@ -45,7 +44,7 @@ below.
 Preview any screen on its own, without running the flow:
 
 ```bash
-osascript -l JavaScript lib/jc-ui.js '{"company":"Acme","accent":"#0E8A5F","icon":"link","title":"Welcome to JumpCloud","message":"Test.","button1":"Link My JumpCloud Account","button2":"Remind Me Later"}'
+osascript -l JavaScript lib/jc-ui.js '{"company":"Acme","accent":"#0E8A5F","icon":"link","title":"Welcome to JumpCloud","message":"Test.","button1":"Link My JumpCloud Account"}'
 ```
 
 ## Architecture
@@ -60,7 +59,7 @@ JumpCloud command (Run As root; {{Apikey}} / {{OrgID}} / {{device.id}} /
      ├─ lib/config.sh      generic defaults; tenant values come from the command
      ├─ lib/logging.sh     /var/log/jc_enroll.log (0600), emails masked
      ├─ lib/preflight.sh   already-bound check, console-user wait,
-     │                     Secure Token gate, defer/completion state
+     │                     Secure Token gate (no local state)
      ├─ lib/jcapi.sh       JumpCloud REST (the original proven calls)
      ├─ lib/ui.sh          screen wrappers; run the renderer as the console user
      ├─ lib/jc-ui.js       native AppKit renderer (osascript JXA) — the UI
@@ -71,7 +70,7 @@ JumpCloud command (Run As root; {{Apikey}} / {{OrgID}} / {{device.id}} /
 ```
 
 State model: `WELCOME → CREDENTIALS → LINKING → SUCCESS`, with
-`WELCOME → DEFERRED`, `CREDENTIALS → AUTH_FAILED → CREDENTIALS`,
+`CREDENTIALS → AUTH_FAILED → CREDENTIALS`,
 `LINKING → BIND_FAILED → LINKING (retry)`, plus `BLOCKED`,
 `UNAVAILABLE` and `CLOSED`.
 
@@ -82,7 +81,7 @@ State model: `WELCOME → CREDENTIALS → LINKING → SUCCESS`, with
 | `{{device.primary_user_id}}` already set | Device is already bound → exit immediately, no prompt |
 | Console user | Polls `/dev/console`, skipping `root` / `_mbsetupuser` / `loginwindow` until a real user is logged in |
 | **Secure Token** | `_jumpcloudserviceaccount` must exist **and** hold a Secure Token, otherwise exit quietly without prompting (JumpCloud cannot manage the local password/FileVault without it). Set `SHOW_BLOCKED_SCREEN=1` to tell the user instead of exiting silently. |
-| Completed / deferred | Local state under `/Library/Application Support/JumpCloudEnrollment` |
+| Local state | **None.** There is no defer window and no completion marker, so nothing on disk can suppress the prompt or bring it back later. How often it runs is entirely the JumpCloud schedule's business. |
 
 ## Setup
 
@@ -95,8 +94,6 @@ JC_REGION="US"                         # US or EU tenant
 COMPANY_NAME="Your Organization"
 SUPPORT_CONTACT="your IT administrator"
 LOGO_PATH=""                           # optional logo PNG on the device
-DEFER_MINUTES=120                      # "Remind Me Later" snooze
-DEFER_MAX_COUNT=0                      # 0 = unlimited defers
 LDAP_HOST="ldap.jumpcloud.com"
 LDAP_PORT=636                          # 636 = LDAPS, 389 = StartTLS
 REQUIRE_SECURE_TOKEN=1
@@ -128,7 +125,7 @@ Mac, **Run As: root**, **timeout ≥ 3900 s** (a person interacts with a
 window), and paste `MDM-Command.sh`. Nothing needs to be attached: the
 command downloads the zip itself, checks it against the pinned hash and
 runs it. Target a device group and schedule it to repeat — bound,
-completed and deferred Macs exit in well under a second.
+already-bound Macs exit in well under a second.
 
 Attaching the zip to the command still works and takes precedence over
 downloading, so an air-gapped or attachment-only tenant needs no change:
@@ -208,12 +205,12 @@ bash tests/test-units.sh
 bash tests/test-flow.sh
 ```
 
-- `test-units.sh` — 71 assertions: JSON escaping, email masking, user
+- `test-units.sh` — 75 assertions: JSON escaping, email masking, user
   lookup parsing, 5xx retry, username alignment (case-insensitive
   compare, original case sent), 409-as-success, every failure category,
-  defer/completion state, the renderer-result parser, and the credential helper's status tokens.
-- `test-flow.sh` — 31 assertions: drives the real orchestrator with
-  stubbed macOS commands through the happy path, defer, invalid email,
+  the renderer-result parser, the user lookup, and the host's status tokens.
+- `test-flow.sh` — 34 assertions: drives the real orchestrator with
+  stubbed macOS commands through the happy path, a dismissed window, invalid email,
   wrong password, LDAP unavailable, binding failure, retry, already
   bound, missing Secure Token and missing `ORG_ID`.
 
@@ -262,7 +259,7 @@ the DN template and LDAP enablement work before going live.
 | `CONFIG_ERROR` | Bad DN template, unsupported LDAP port, or no LDAP client tools |
 | `ASSOCIATION_FAILED` / `PRIMARY_USER_FAILED` / `USERNAME_ALIGNMENT_FAILED` | JumpCloud API rejected that step — see the log and the device description |
 | `package hash mismatch` | The attached zip doesn't match the command; rebuild and republish both |
-| No window appears | No console user yet, device already bound/deferred, or Secure Token gate |
+| No window appears | No console user yet, device already bound, or the Secure Token gate |
 
 Logs: `sudo tail -40 /var/log/jc_enroll.log`.
 Reset local state: `sudo rm -rf "/Library/Application Support/JumpCloudEnrollment"`.

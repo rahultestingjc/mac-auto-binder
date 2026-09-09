@@ -29,7 +29,7 @@
 # codes. Nothing here may switch errexit on. An earlier version wrapped
 # each render in `set +e ... set -e`, which left errexit ENABLED for the
 # rest of the run; after the first screen, "Remind Me Later" and every
-# binding failure aborted the script instead of reaching DEFERRED and
+# binding failure aborted the script instead of reaching CLOSED and
 # BIND_FAILED.
 # =====================================================================
 
@@ -237,29 +237,20 @@ ui_valid_email() {
 # WELCOME -> 0 = link now, 1 = remind me later, 2 = closed/dismissed
 # ---------------------------------------------------------------------
 ui_welcome() {
-    local rc msg note btn2="" spec
+    local rc msg spec
     msg="${COMPANY_NAME} uses JumpCloud to securely manage identity and access to company resources. To provide a seamless sign-in experience, link your JumpCloud account with this Mac."
 
-    if jc_defer_allowed; then
-        note="Not a good time? You'll be reminded again in about $(( DEFER_MINUTES / 60 )) hours."
-        btn2=",\"button2\":\"Remind Me Later\""
-    else
-        note="Linking is required and can no longer be postponed."
-    fi
-
+    # No "Remind Me Later": there is no snooze and no local state. Whether
+    # this runs at all is decided solely by primary_user_id in the MDM
+    # command. Closing the window just ends this run.
     spec="{$(ui_common_json),\"icon\":\"link\",\"title\":\"Welcome to JumpCloud\""
     spec="${spec},\"message\":\"$(ui_esc "$msg")\""
     spec="${spec},\"footer\":\"Once linked, your JumpCloud password becomes your Mac login password.\""
-    spec="${spec},\"button1\":\"Link My JumpCloud Account\"${btn2}"
-    spec="${spec},\"note\":\"$(ui_esc "$note")\""
+    spec="${spec},\"button1\":\"Link My JumpCloud Account\""
     spec="${spec},\"support\":\"Managed by $(ui_esc "${COMPANY_NAME}"). Questions? Contact $(ui_esc "${SUPPORT_CONTACT}").\"}"
 
     ui_render "$spec"; rc=$?
-    case $rc in
-        0) return 0 ;;
-        1) jc_defer_allowed && return 1 || return 2 ;;
-        *) return 2 ;;
-    esac
+    [[ $rc -eq 0 ]] && return 0 || return 2
 }
 
 
@@ -281,11 +272,10 @@ ui_message_screen() {
 
 # 0 = try again, 1 = remind me later / closed
 ui_auth_failed() {
-    local b2="" rc
-    jc_defer_allowed && b2="Remind Me Later"
+    local rc
     ui_message_screen "warn" "We couldn't verify your account" \
         "The email address or password you entered couldn't be verified. Check your credentials and try again." \
-        "Try Again" "$b2"
+        "Try Again" "Close"
     rc=$?
     [[ $rc -eq 0 ]] && return 0 || return 1
 }

@@ -9,10 +9,12 @@
 #
 # State model:
 #   WELCOME -> CREDENTIALS -> LINKING -> SUCCESS
-#   WELCOME -> DEFERRED
 #   CREDENTIALS -> AUTH_FAILED -> CREDENTIALS
 #   LINKING  -> BIND_FAILED  -> LINKING (retry)
 #   any      -> BLOCKED / UNAVAILABLE / CLOSED
+#
+# Whether this runs at all is decided ONLY by primary_user_id: set means
+# already bound, so skip. There is no defer and no completion marker.
 #
 # The user's password NEVER enters this process: the credential screen
 # and the LDAP bind run in user/ui-host.sh as the console user, which
@@ -95,14 +97,9 @@ if jc_already_bound; then
 fi
 jc_info "No primary user detected. Continuing workflow..."
 
-jc_state_init
-if jc_is_completed; then
-    jc_info "Enrollment already completed on this Mac."
-    FINAL_STATUS="Skipped"; FINAL_ISSUE="None"; FINAL_NOTE="Already completed"; finish
-fi
-if jc_defer_active; then
-    FINAL_STATUS="Deferred"; FINAL_ISSUE="None"; FINAL_NOTE="Defer window active"; finish
-fi
+# Whether to prompt is decided ONLY by primary_user_id, above. There is no
+# defer window and no completion marker: nothing on disk can suppress the
+# prompt or bring it back later.
 
 if ! jc_missing_tools; then
     FINAL_ISSUE="Missing required tools"; finish
@@ -161,7 +158,6 @@ while true; do
         ui_welcome
         case $? in
             0) STATE="CREDENTIALS" ;;
-            1) STATE="DEFERRED" ;;
             *) STATE="CLOSED" ;;
         esac
         ;;
@@ -178,7 +174,16 @@ while true; do
                     STATE="LINKING"
                 fi
                 ;;
-            AUTH_FAILED)  STATE="AUTH_FAILED" ;;
+            AUTH_FAILED)
+                # Admin-visible only (MDM console + root log). The user still
+                # sees one generic message, so this leaks no account info
+                # to them, but it tells you which half failed.
+                if [[ -z "${JC_USERNAME:-}" ]]; then
+                    FINAL_ISSUE="Rejected: no JumpCloud user matched that email"
+                else
+                    FINAL_ISSUE="Rejected: resolved JC user ${JC_USERNAME}, LDAP bind refused it"
+                fi
+                STATE="AUTH_FAILED" ;;
             BACK)         STATE="WELCOME" ;;
             CANCELLED)    STATE="CLOSED" ;;
             TIMEOUT|UNAVAILABLE)
@@ -211,7 +216,7 @@ while true; do
         if ui_auth_failed; then
             STATE="CREDENTIALS"
         else
-            jc_defer_allowed && STATE="DEFERRED" || STATE="CLOSED"
+            STATE="CLOSED"
         fi
         ;;
 
@@ -226,7 +231,6 @@ while true; do
 
     SUCCESS)
         jc_info "State -> SUCCESS"
-        [[ "${JC_DRY_RUN}" != "1" ]] && jc_mark_completed
         FINAL_STATUS="Good"; FINAL_ISSUE="None"
         if ui_success; then
             FINAL_NOTE="User signed out immediately"
@@ -242,13 +246,6 @@ while true; do
         jc_info "State -> UNAVAILABLE"
         ui_unavailable
         [[ "$FINAL_ISSUE" == "None" ]] && FINAL_ISSUE="Service unavailable"
-        finish
-        ;;
-
-    DEFERRED)
-        jc_info "State -> DEFERRED"
-        jc_record_defer
-        FINAL_STATUS="Deferred"; FINAL_ISSUE="None"; FINAL_NOTE="User chose Remind Me Later"
         finish
         ;;
 

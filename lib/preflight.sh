@@ -7,7 +7,9 @@
 #   2. wait for a REAL console user (not root/_mbsetupuser/loginwindow).
 #   3. _jumpcloudserviceaccount must hold a Secure Token, else skip
 #      silently (JumpCloud cannot manage the local password without it).
-# Adds defer/completion state so "Remind Me Later" can work.
+# There is NO local state: whether to prompt is decided ONLY by the
+# primary_user_id the MDM command passes in. Nothing on disk can suppress
+# or re-schedule the prompt.
 # =====================================================================
 
 CONSOLE_USER=""
@@ -85,69 +87,3 @@ jc_missing_tools() {
 
 # ---------------------------------------------------------------------
 # Defer / completion state (plain files - simple and robust).
-# ---------------------------------------------------------------------
-jc_state_init() {
-    mkdir -p "$JC_STATE_DIR" 2>/dev/null || true
-    chmod 755 "$JC_STATE_DIR" 2>/dev/null || true
-}
-
-jc_state_path() { printf '%s/%s' "$JC_STATE_DIR" "$1"; }
-
-jc_mark_completed() {
-    date -u '+%Y-%m-%dT%H:%M:%SZ' > "$(jc_state_path completed)" 2>/dev/null || true
-}
-
-jc_is_completed() {
-    [[ -f "$(jc_state_path completed)" ]]
-}
-
-# Returns 0 while a defer is still active.
-jc_defer_active() {
-    local f now until
-    f="$(jc_state_path defer_until)"
-    [[ -f "$f" ]] || return 1
-    until="$(cat "$f" 2>/dev/null || echo 0)"
-    [[ "$until" =~ ^[0-9]+$ ]] || return 1
-    now="$(date +%s)"
-    if (( now < until )); then
-        jc_info "Defer active until epoch ${until} - not prompting."
-        return 0
-    fi
-    return 1
-}
-
-jc_record_defer() {
-    local count until
-    count="$(cat "$(jc_state_path defer_count)" 2>/dev/null || echo 0)"
-    [[ "$count" =~ ^[0-9]+$ ]] || count=0
-    count=$(( count + 1 ))
-    until=$(( $(date +%s) + DEFER_MINUTES * 60 ))
-    printf '%s' "$until" > "$(jc_state_path defer_until)" 2>/dev/null || true
-    printf '%s' "$count" > "$(jc_state_path defer_count)" 2>/dev/null || true
-    jc_info "User deferred; next prompt after epoch ${until} (defer #${count})"
-}
-
-# Returns 0 when "Remind Me Later" may still be offered.
-jc_defer_allowed() {
-    local count deadline_epoch now
-    if (( DEFER_MAX_COUNT > 0 )); then
-        count="$(cat "$(jc_state_path defer_count)" 2>/dev/null || echo 0)"
-        [[ "$count" =~ ^[0-9]+$ ]] || count=0
-        if (( count >= DEFER_MAX_COUNT )); then
-            jc_warn "Defer limit reached (${count}/${DEFER_MAX_COUNT})."
-            return 1
-        fi
-    fi
-    if [[ -n "${DEFER_DEADLINE_UTC:-}" ]]; then
-        # BSD date (macOS) parsing of ISO-8601.
-        deadline_epoch="$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$DEFER_DEADLINE_UTC" +%s 2>/dev/null || echo "")"
-        if [[ -n "$deadline_epoch" ]]; then
-            now="$(date +%s)"
-            if (( now >= deadline_epoch )); then
-                jc_warn "Defer deadline ${DEFER_DEADLINE_UTC} has passed."
-                return 1
-            fi
-        fi
-    fi
-    return 0
-}

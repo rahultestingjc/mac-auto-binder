@@ -48,7 +48,7 @@ success, auth failed, bind failed, blocked). Match these.
 Preview any screen instantly:
 
 ```
-osascript -l JavaScript lib/jc-ui.js '{"company":"Acme","accent":"#0E8A5F","icon":"link","title":"Welcome to JumpCloud","message":"Test message.","button1":"Link My JumpCloud Account","button2":"Remind Me Later"}'
+osascript -l JavaScript lib/jc-ui.js '{"company":"Acme","accent":"#0E8A5F","icon":"link","title":"Welcome to JumpCloud","message":"Test message.","button1":"Link My JumpCloud Account"}'
 ```
 
 Click through the whole flow without root:
@@ -59,9 +59,15 @@ Click through the whole flow without root:
 
 ## Flow (matches Windows)
 
-`WELCOME → CREDENTIALS → LINKING → SUCCESS`, plus `DEFERRED`,
+`WELCOME → CREDENTIALS → LINKING → SUCCESS`, plus
 `AUTH_FAILED → CREDENTIALS`, `BIND_FAILED → LINKING`, `BLOCKED`,
 `UNAVAILABLE`, `CLOSED`.
+
+**Whether it runs at all is decided ONLY by `{{device.primary_user_id}}`:**
+set means already bound, so skip; otherwise prompt. There is no defer, no
+"Remind Me Later" and no completion marker - nothing on disk can suppress
+the prompt or bring it back later. Repeat behaviour is entirely the
+JumpCloud schedule's business.
 
 `CREDENTIALS` is **one screen collecting work email AND password**
 together (Windows parity), owned by `user/ui-host.sh` running as the
@@ -85,7 +91,7 @@ Root serves that lookup inside `ui_credentials_step` in `lib/ui.sh`
 - `lib/ui.sh` — screen wrappers that call the renderer as the console user.
 - `lib/config.sh` — GENERIC defaults; tenant values arrive as env vars.
 - `lib/preflight.sh` — already-bound precheck, console-user wait, Secure
-  Token gate, defer/completion state.
+  Token gate. No local state at all.
 - `lib/jcapi.sh` — JumpCloud REST (ported from the proven `jc_bind.sh`).
 - `lib/logging.sh` — `/var/log/jc_enroll.log` (0600), emails masked.
 - `user/ui-host.sh` — console-user process: owns the single window and
@@ -98,8 +104,8 @@ Root serves that lookup inside `ui_credentials_step` in `lib/ui.sh`
 
 First bring-up on real Mac hardware is done. Both suites are green:
 
-- `tests/test-units.sh` — 71 pass / 0 fail
-- `tests/test-flow.sh`  — 31 pass / 0 fail
+- `tests/test-units.sh` — 75 pass / 0 fail
+- `tests/test-flow.sh`  — 34 pass / 0 fail
 - `bash build/build-package.sh` passes (runs both suites + the CR gate)
 
 The renderer has been exercised on real modal windows: button routing,
@@ -134,7 +140,7 @@ Reference comparison screenshots were checked against
 errexit **on** for the rest of the run even though `jc-enroll.sh` is
 deliberately written without it. After the first screen, "Remind Me
 Later" and any binding failure aborted the script instead of reaching
-`DEFERRED` / `BIND_FAILED`. Never re-enable errexit there.
+`CLOSED` / `BIND_FAILED`. Never re-enable errexit there.
 
 `json_field` (now in `user/ui-host.sh`) used `"([^"]*)"`, which
 truncated any password containing `"` or `\` (the renderer escapes both),
@@ -159,6 +165,20 @@ rather than the shipped behaviour):
    and `exec`s the renderer in place, so the pidfile holds the process that
    owns the window. The `launchctl` stub in `tests/` forks too, since the
    old `exec` stub collapsed all three processes into one PID and hid this.
+
+Found on a real tenant with a real test account (`uid=varun` bound fine by
+hand, but the app rejected the same credentials):
+
+9. `jc_find_user_by_email` sent `fields` as THREE separate query params.
+   JumpCloud takes one space-separated list, so the server honoured a
+   single one and replied without `_id`/`username`. Every lookup missed,
+   root answered `NONE`, and the user was told their correct credentials
+   could not be verified - the LDAP bind was never attempted. The
+   projection is gone entirely; the whole record is requested.
+10. The `_id` parser used a greedy `.*` across the whole body, so on a full
+    record it picked a NESTED `_id` (from `attributes[]`) instead of the
+    user's own. The body is now split on commas first, so each match stays
+    inside one field, and `head -n1` takes the first.
 
 ### Still unverified
 

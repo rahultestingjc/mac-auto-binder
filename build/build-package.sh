@@ -132,8 +132,6 @@ JC_REGION="US"                         # US or EU tenant
 COMPANY_NAME="Your Organization"
 SUPPORT_CONTACT="your IT administrator"
 LOGO_PATH=""                           # optional logo PNG on the device
-DEFER_MINUTES=120                      # "Remind Me Later" snooze
-DEFER_MAX_COUNT=0                      # 0 = unlimited defers
 LDAP_HOST="ldap.jumpcloud.com"         # rarely changed
 LDAP_PORT=636                          # 636 = LDAPS, 389 = StartTLS
 REQUIRE_SECURE_TOKEN=1                 # gate on the JC service account
@@ -235,7 +233,6 @@ chmod +x "$APP_DIR/jc-enroll.sh" "$APP_DIR/user/"*.sh 2>/dev/null || true
 
 export API_KEY ORG_ID SYSTEM_ID PRIMARY_USER_ID JC_REGION
 export COMPANY_NAME SUPPORT_CONTACT LOGO_PATH
-export DEFER_MINUTES DEFER_MAX_COUNT
 export LDAP_HOST LDAP_PORT REQUIRE_SECURE_TOKEN SHOW_BLOCKED_SCREEN
 
 exec "$APP_DIR/jc-enroll.sh"

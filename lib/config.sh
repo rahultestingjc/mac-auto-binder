@@ -38,11 +38,6 @@ fi
 # neutral system symbol (never a fabricated JumpCloud logo).
 : "${LOGO_PATH:=}"
 
-# ---- Defer ("Remind Me Later") ----
-: "${DEFER_MINUTES:=120}"
-: "${DEFER_MAX_COUNT:=0}"             # 0 = unlimited
-: "${DEFER_DEADLINE_UTC:=}"           # e.g. 2026-10-01T00:00:00Z
-
 # ---- Behavior / timing ----
 : "${START_DELAY_SECONDS:=5}"
 : "${CONSOLE_USER_WAIT_MAX:=600}"

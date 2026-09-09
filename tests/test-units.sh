@@ -34,7 +34,7 @@ export JC_LOG_FILE="$(mktemp)"
 export JC_STATE_DIR="$(mktemp -d)"
 export API_KEY="test-key" SYSTEM_ID="sys123" ORG_ID="org123"
 export API_MAX_TRIES=2 API_RETRY_SLEEP=0
-export DEFER_MINUTES=120 DEFER_MAX_COUNT=0 DEFER_DEADLINE_UTC=""
+
 export CONSOLE_USER="jdoe"
 
 . "$ROOT/lib/logging.sh"
@@ -93,6 +93,35 @@ case "$(mock_last)" in
     *"filter=email:eq:j@x.io"*) assert true 'sends email filter' ;;
     *) assert false 'sends email filter' ;;
 esac
+
+# The lookup used to send `fields` three times. JumpCloud takes ONE
+# space-separated list, so the server honoured a single one and replied
+# without _id/username: every lookup missed, and the user was told their
+# correct credentials could not be verified.
+case "$(mock_last)" in
+    *"fields="*) assert false 'no fields projection is sent (it broke the reply)' ;;
+    *)           assert true  'no fields projection is sent (it broke the reply)' ;;
+esac
+
+# A full record contains nested objects with their own _id. A greedy match
+# across the whole body picks the LAST one; the record's own _id is first.
+mock_full() {
+    MOCK_CODE=200
+    MOCK_BODY='{"totalCount":1,"results":[{"_id":"0123456789abcdef01234567","username":"varun","email":"varun@mylab.com","attributes":[{"_id":"ffffffffffffffffffffffff","name":"dept"}],"organization":"aaaaaaaaaaaaaaaaaaaaaaaa"}]}'
+}
+MOCK_HANDLER=mock_full
+jc_find_user_by_email "varun@mylab.com" >/dev/null 2>&1
+assert_eq "$JC_USER_ID"  "0123456789abcdef01234567" 'takes the record _id, not a nested one'
+assert_eq "$JC_USERNAME" "varun"                    'username drives the LDAP DN'
+
+# A record with no username cannot build a DN, so it must not look resolved.
+mock_nouser() {
+    MOCK_CODE=200
+    MOCK_BODY='{"totalCount":1,"results":[{"_id":"0123456789abcdef01234567","email":"x@y.io"}]}'
+}
+MOCK_HANDLER=mock_nouser
+jc_find_user_by_email "x@y.io" >/dev/null 2>&1
+assert_eq "$?" "1" 'a user with no username is reported as unresolved'
 
 mock_none() { MOCK_CODE=200; MOCK_BODY='{"results":[]}'; }
 MOCK_HANDLER=mock_none
@@ -178,22 +207,23 @@ MOCK_HANDLER=route_username_fail
 out="$(jc_run_binding_pipeline "u1" "different" "jdoe" "j@x.io" 2>/dev/null)"
 assert_eq "$out" "USERNAME_ALIGNMENT_FAILED" 'reports USERNAME_ALIGNMENT_FAILED'
 
-printf '\n--- defer state ---\n'
+printf '\n--- no local state can suppress or re-schedule the prompt ---\n'
+# Deferring and the completion marker were removed: the ONLY thing that
+# decides whether the prompt runs is primary_user_id from the MDM command.
 MOCK_HANDLER=mock_default
-jc_state_init
-jc_defer_active; assert_eq "$?" "1" 'no defer active initially'
-jc_record_defer
-jc_defer_active; assert_eq "$?" "0" 'defer active after recording'
-assert_eq "$(cat "$JC_STATE_DIR/defer_count")" "1" 'defer count incremented'
-jc_defer_allowed; assert_eq "$?" "0" 'defer allowed when unlimited'
-
-DEFER_MAX_COUNT=1
-jc_defer_allowed; assert_eq "$?" "1" 'defer refused once limit reached'
-DEFER_MAX_COUNT=0
-
-jc_is_completed; assert_eq "$?" "1" 'not completed initially'
-jc_mark_completed
-jc_is_completed; assert_eq "$?" "0" 'completed marker detected'
+for fn in jc_state_init jc_defer_active jc_defer_allowed jc_record_defer \
+          jc_is_completed jc_mark_completed; do
+    if type "$fn" >/dev/null 2>&1; then
+        assert false "$fn is gone"
+    else
+        assert true  "$fn is gone"
+    fi
+done
+if grep -q 'DEFER_MINUTES\|DEFER_MAX_COUNT\|DEFER_DEADLINE' "$ROOT/lib/config.sh"; then
+    assert false 'no defer knobs remain in config'
+else
+    assert true  'no defer knobs remain in config'
+fi
 
 printf '\n--- already-bound precheck ---\n'
 PRIMARY_USER_ID=""; jc_already_bound; assert_eq "$?" "1" 'empty primary user -> not bound'

@@ -1,0 +1,185 @@
+# Mac Auto Binder — project context for Claude Code
+
+macOS JumpCloud device-enrollment workflow, built to mirror the Windows
+client (`Windows Auto Binder`) in both **look and flow**.
+
+**Never yet run on real Mac hardware.** It was authored on a Windows box.
+The macOS-only paths (AppKit rendering via JXA, `sysadminctl`,
+`launchctl asuser`, real `ldapsearch`) are UNVERIFIED. You are likely the
+first session on an actual Mac.
+
+## Dependencies: bash + macOS built-ins ONLY
+
+No Python (macOS ships none), no swiftDialog, no jq, no Homebrew.
+Runtime uses only: `osascript`, `curl`, `sed`, `grep`, `tr`, `head`,
+`mktemp`, `stat`, `launchctl`, `sysadminctl`, `defaults`,
+`ldapwhoami`/`ldapsearch`. The build additionally uses `zip`/`shasum`.
+**Do not introduce an interpreter dependency.**
+
+## The UI (`lib/jc-ui.js`)
+
+A native **AppKit** renderer driven through `osascript -l JavaScript`
+(JXA), present on every macOS. It draws the same card design as Windows:
+rounded white card + shadow, brand accent, typography scale, numbered
+"What happens next" step card, native spinner, show/hide password.
+
+- Input: one JSON "screen spec" as argv[0].
+- Output: `{"button":0|1,"fields":{...}}` on stdout.
+- Exit: 0 = button1, 1 = button2, 2 = closed/dismissed.
+- Spec keys: `screen, company, accent, title, message, error, note,
+  reference, support, footer, steps[], back,
+  fields[{key,label,secure,value,placeholder}],
+  button1, button2, icon(link|lock|warn|error|info|check)`.
+
+**Reference screenshots of the Windows UI** — the design target — are in
+`docs/windows-reference/*.png` (welcome, account entry, progress,
+success, auth failed, bind failed, blocked). Match these.
+
+Preview any screen instantly:
+
+```
+osascript -l JavaScript lib/jc-ui.js '{"company":"Acme","accent":"#0E8A5F","icon":"lock","title":"Welcome to JumpCloud","message":"Test message.","button1":"Link My JumpCloud Account","button2":"Remind Me Later"}'
+```
+
+## Flow (matches Windows)
+
+`WELCOME → CREDENTIALS → LINKING → SUCCESS`, plus `DEFERRED`,
+`AUTH_FAILED → CREDENTIALS`, `BIND_FAILED → LINKING`, `BLOCKED`,
+`UNAVAILABLE`, `CLOSED`.
+
+`CREDENTIALS` is **one screen collecting work email AND password**
+together (Windows parity), owned by `user/verify-credentials.sh` running
+as the console user. Because root holds the API key, the two exchange
+non-secret messages via file IPC while the helper keeps the password:
+
+```
+helper -> root : $JC_IPC_DIR/email.req   (entered email)
+root -> helper : $JC_IPC_DIR/user.resp   (JumpCloud username, or NONE)
+```
+
+Root serves that lookup inside `run_credentials_step` in `jc-enroll.sh`
+(deliberately NOT called via `$( )` — it must set globals).
+
+## Layout
+
+- `jc-enroll.sh` — root orchestrator / state machine (entry point).
+- `lib/jc-ui.js` — native AppKit renderer (the UI).
+- `lib/ui.sh` — screen wrappers that call the renderer as the console user.
+- `lib/config.sh` — GENERIC defaults; tenant values arrive as env vars.
+- `lib/preflight.sh` — already-bound precheck, console-user wait, Secure
+  Token gate, defer/completion state.
+- `lib/jcapi.sh` — JumpCloud REST (ported from the proven `jc_bind.sh`).
+- `lib/logging.sh` — `/var/log/jc_enroll.log` (0600), emails masked.
+- `user/verify-credentials.sh` — console-user process: credential screen
+  + LDAPS bind; returns ONLY a status token.
+- `build/build-package.sh` — emits `dist/` (zip + MDM-Command.sh + hash).
+- `tests/` — `test-units.sh`, `test-flow.sh`, `dry-run.sh`.
+
+## CURRENT STATUS
+
+First bring-up on real Mac hardware is done. Both suites are green:
+
+- `tests/test-units.sh` — 51 pass / 0 fail
+- `tests/test-flow.sh`  — 31 pass / 0 fail
+- `bash build/build-package.sh` passes (runs both suites + the CR gate)
+
+The renderer has been exercised on real modal windows: button routing,
+JSON result, exit codes, show/hide password, and the window-close path.
+Reference comparison screenshots were checked against
+`docs/windows-reference/`.
+
+### Bugs found and fixed during bring-up (do not reintroduce)
+
+`lib/jc-ui.js` — none of this works under JXA, and each one was fatal:
+
+1. `$.NSApp` is nil until `$.NSApplication.sharedApplication` is sent.
+   Without it `runModalForWindow` returns nil, so every screen reported
+   "dismissed" and exited 2.
+2. Assigning a `CGColorRef` (`layer.backgroundColor` / `layer.borderColor`)
+   **kills the process with SIGKILL**. All fills, borders and corner radii
+   go through `NSBox`, which takes `NSColor`.
+3. `NSAttributedString`'s initialisers are not exposed by the bridge.
+   Buttons are an `NSBox` + a plain `NSTextField` under a transparent,
+   title-less `NSButton` that takes the clicks.
+4. Inside an `ObjC.registerSubclass` implementation, `id` arguments come
+   back with a lighter wrapper: `sender.tag` is a **string**, so
+   `=== 100` never matched and every primary button read as button 2.
+   Coerce with `Number()`.
+5. `$.NSImageSymbolScaleMedium` is undefined; passing `undefined` where an
+   NSInteger is expected aborts. Use the literal `2`.
+6. BridgeSupport reports the **legacy** `NSTextAlignment` ordering
+   (left/right/center) under the modern names, while AppKit at runtime
+   uses the UIKit ordering. Use the literals 0/1/2.
+
+`lib/ui.sh` — every screen wrapper ended with `set -e`, which switched
+errexit **on** for the rest of the run even though `jc-enroll.sh` is
+deliberately written without it. After the first screen, "Remind Me
+Later" and any binding failure aborted the script instead of reaching
+`DEFERRED` / `BIND_FAILED`. Never re-enable errexit there.
+
+`user/verify-credentials.sh` — `json_field` used `"([^"]*)"`, which
+truncated any password containing `"` or `\` (the renderer escapes both),
+so correct passwords failed the LDAP bind. It now walks the value and
+undoes the escapes, in pure bash 3.2.
+
+### Still unverified
+
+- A real LDAPS bind against JumpCloud (needs a real user's password).
+- A real MDM run (genuinely binds the device).
+- Clicking the UI by hand — the flow was driven programmatically because
+  this environment has no Accessibility permission for synthetic input.
+
+## First runs on this Mac
+
+```
+sudo ./tests/dry-run.sh                                   # simulated LDAP + binding
+sudo ./tests/dry-run.sh --real-ldap --org <ORG_ID>        # real read-only LDAPS bind
+sudo ./tests/dry-run.sh --ldap invalid                    # failure path
+```
+
+Logs: `sudo tail -40 /var/log/jc_enroll.log`.
+Reset: `sudo rm -rf "/Library/Application Support/JumpCloudEnrollment"`.
+
+## Hard constraints (do not regress)
+
+1. **macOS ships bash 3.2.** No `mapfile`, no associative arrays, and
+   `"${arr[@]}"` on an EMPTY array errors under `set -u` — use
+   `${arr[@]+"${arr[@]}"}`.
+2. **LF line endings only.** CRLF gives `bad interpreter: /bin/bash^M`.
+   The build gate rejects any CR.
+3. **The password never reaches root.** Screen + bind both live in
+   `user/verify-credentials.sh`; the password reaches LDAP tools via a
+   **FIFO** — never `-w` (ps-visible), never `-y <file>` (on disk).
+4. **No plaintext LDAP.** 636 = LDAPS, 389 = StartTLS (`-ZZ`),
+   `LDAPTLS_REQCERT=demand`. No silent fallback.
+5. **No account enumeration.** Unknown email still shows the password
+   prompt and returns the same token as a wrong password.
+6. Keep the original gates: `{{device.primary_user_id}}` already-bound
+   precheck, console-user polling, and the **Secure Token gate** on
+   `_jumpcloudserviceaccount` (silent exit is intentional).
+7. Call `osascript` unqualified (not `/usr/bin/osascript`) so tests can
+   stub it.
+
+## Expected first-run surprises
+
+- **Secure Token gate may stop everything**: if
+  `_jumpcloudserviceaccount` lacks a Secure Token the run exits with
+  `Status: Skipped … Secure Token` and NO window appears. That is correct.
+  Check: `sysadminctl -secureTokenStatus _jumpcloudserviceaccount`.
+- **JXA/AppKit is the least-verified code in the project.** Likely
+  suspects if a window misbehaves: `ObjC.registerSubclass` handler
+  wiring, `$.NSApp.runModalForWindow` / `stopModalWithCode` codes,
+  `fittingSize` height measurement, and the show/hide password swap.
+- LDAP result codes: 0 ok, 49 bad credentials, 32/34 DN/config, 85 timeout.
+
+## Deployment
+
+`bash build/build-package.sh` → `dist/JumpCloudEnrollment-macOS.zip` +
+`dist/MDM-Command.sh` (SHA-256 pinned). JumpCloud: Mac command,
+**Run As root**, **timeout ≥ 3900 s**, paste the command, **attach the
+zip** (attachments land in `/tmp` on macOS). Only the TENANT SETTINGS
+block at the top of the command is edited per organization; the zip stays
+tenant-neutral.
+
+A real MDM run genuinely binds the device and sets the primary user —
+only run it against a Mac you intend to enroll.

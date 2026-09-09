@@ -1,0 +1,7 @@
+.DS_Store
+*.swp
+.jc-enroll-test.*.sh
+
+# Design references: kept locally. The captures include whatever was on
+# screen behind the app window, so they are not published.
+docs/windows-reference/

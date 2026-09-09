@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings: CRLF breaks the macOS interpreter.
+*.sh text eol=lf
+*.zip binary
+*.pkg binary

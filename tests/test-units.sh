@@ -451,6 +451,58 @@ else
     printf '  SKIP  UI host tests (need mkfifo)\n'
 fi
 
+printf '\n--- MDM command: package trust ---\n'
+# The command downloads a zip and runs it as root, so the SHA-256 pinned in
+# the command text is the whole trust anchor. These check the gates that
+# run BEFORE anything is extracted.
+if [[ -f "$ROOT/dist/MDM-Command.sh" && -f "$ROOT/dist/JumpCloudEnrollment-macOS.zip" ]]; then
+    mdm_run() {   # mdm_run <package-url> [zip-to-place-beside-the-command]
+        local url="$1" zipsrc="${2:-}" d out
+        d="$(mktemp -d)"
+        sed -e 's/^API_KEY=.*/API_KEY="k"/' \
+            -e 's/^JC_ORG_VAR=.*/JC_ORG_VAR=""/' \
+            -e 's/^SYSTEM_ID=.*/SYSTEM_ID="s1"/' \
+            -e 's/^PRIMARY_USER_ID=.*/PRIMARY_USER_ID=""/' \
+            -e 's|^ORG_ID=""|ORG_ID="org1"|' \
+            -e "s|^PACKAGE_URL=.*|PACKAGE_URL=\"${url}\"|" \
+            "$ROOT/dist/MDM-Command.sh" > "$d/cmd.sh"
+        [[ -n "$zipsrc" ]] && cp "$zipsrc" "$d/JumpCloudEnrollment-macOS.zip"
+        out="$(cd "$d" && bash cmd.sh 2>&1)"
+        rm -rf "$d"
+        printf '%s' "$out"
+    }
+    ZIPOK="$ROOT/dist/JumpCloudEnrollment-macOS.zip"
+    BADZIP="$(mktemp)"; printf 'not the real package' > "$BADZIP"
+
+    case "$(mdm_run 'http://example.com/pkg.zip')" in
+        *"must be https"*) assert true  'plain-http PACKAGE_URL is refused' ;;
+        *)                 assert false 'plain-http PACKAGE_URL is refused' ;;
+    esac
+    case "$(mdm_run 'ftp://example.com/pkg.zip')" in
+        *"must be https"*) assert true  'non-https scheme is refused' ;;
+        *)                 assert false 'non-https scheme is refused' ;;
+    esac
+    case "$(mdm_run '')" in
+        *"not found"*) assert true  'no URL and no attachment is a clear error' ;;
+        *)             assert false 'no URL and no attachment is a clear error' ;;
+    esac
+    case "$(mdm_run '' "$BADZIP")" in
+        *"hash mismatch"*) assert true  'a package that does not match the pin is refused' ;;
+        *)                 assert false 'a package that does not match the pin is refused' ;;
+    esac
+    case "$(mdm_run '' "$BADZIP")" in
+        *"Package hash verified"*) assert false 'a mismatched package is never extracted' ;;
+        *)                         assert true  'a mismatched package is never extracted' ;;
+    esac
+    case "$(mdm_run 'https://example.invalid/pkg.zip' "$ZIPOK")" in
+        *"Package hash verified"*) assert true  'an attached package is used without downloading' ;;
+        *)                         assert false 'an attached package is used without downloading' ;;
+    esac
+    rm -f "$BADZIP"
+else
+    printf '  SKIP  MDM command tests (run build/build-package.sh first)\n'
+fi
+
 printf '\n--- password never appears in the log ---\n'
 grep -qi "hunter2\|password.*=" "$JC_LOG_FILE" && \
     assert false 'log is free of credential material' || \

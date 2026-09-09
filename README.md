@@ -110,22 +110,41 @@ says so. The packaged zip stays tenant-neutral — one package, any tenant.
 
 ## Deploy
 
+One command, one zip. Build with the URL the zip will be published at:
+
 ```bash
-bash build/build-package.sh
+bash build/build-package.sh --url https://raw.githubusercontent.com/OWNER/REPO/main/dist/JumpCloudEnrollment-macOS.zip
 ```
 
-Produces `dist/JumpCloudEnrollment-macOS.zip`, `dist/MDM-Command.sh`
-(with the zip's SHA-256 pinned inside it) and `dist/SHA256.txt`.
+That produces:
 
-Then in the JumpCloud console: **Commands → + New Command** → Mac,
-**Run As: root**, **timeout ≥ 3900 s** (a person interacts with a
-window), paste `MDM-Command.sh`, and **attach
-`JumpCloudEnrollment-macOS.zip`** (JumpCloud places attachments in
-`/tmp` on macOS). Target a device group and schedule it to repeat —
-bound, completed and deferred Macs exit in well under a second.
+- `dist/JumpCloudEnrollment-macOS.zip` — the package, tenant-neutral
+- `dist/MDM-Command.sh` — the whole command, with that URL **and** the
+  zip's SHA-256 baked in
+- `dist/SHA256.txt`
 
-The command refuses to run a package whose SHA-256 doesn't match the
-pinned hash, so publish command + zip + hash together.
+Commit both, then in the JumpCloud console: **Commands → + New Command** →
+Mac, **Run As: root**, **timeout ≥ 3900 s** (a person interacts with a
+window), and paste `MDM-Command.sh`. Nothing needs to be attached: the
+command downloads the zip itself, checks it against the pinned hash and
+runs it. Target a device group and schedule it to repeat — bound,
+completed and deferred Macs exit in well under a second.
+
+Attaching the zip to the command still works and takes precedence over
+downloading, so an air-gapped or attachment-only tenant needs no change:
+leave `PACKAGE_URL` empty and attach the file (JumpCloud puts attachments
+in `/tmp` on macOS).
+
+**The hash is the trust anchor.** It lives in the command text you paste
+into the console, not in the package, so a tampered or stale download is
+refused and never executed. The download is HTTPS-only — a `http://` or
+`ftp://` URL is rejected outright. The practical consequence: **every time
+the zip changes you must re-run the build and re-paste the command**, or
+the hash check will correctly fail.
+
+Only the marked block at the top of `dist/MDM-Command.sh` is edited per
+organization; the zip itself stays tenant-neutral, so one package serves
+every tenant.
 
 ### The UI
 
@@ -189,7 +208,7 @@ bash tests/test-units.sh
 bash tests/test-flow.sh
 ```
 
-- `test-units.sh` — 65 assertions: JSON escaping, email masking, user
+- `test-units.sh` — 71 assertions: JSON escaping, email masking, user
   lookup parsing, 5xx retry, username alignment (case-insensitive
   compare, original case sent), 409-as-success, every failure category,
   defer/completion state, the renderer-result parser, and the credential helper's status tokens.

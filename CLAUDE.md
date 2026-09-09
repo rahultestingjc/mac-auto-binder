@@ -98,7 +98,7 @@ Root serves that lookup inside `ui_credentials_step` in `lib/ui.sh`
 
 First bring-up on real Mac hardware is done. Both suites are green:
 
-- `tests/test-units.sh` — 65 pass / 0 fail
+- `tests/test-units.sh` — 71 pass / 0 fail
 - `tests/test-flow.sh`  — 31 pass / 0 fail
 - `bash build/build-package.sh` passes (runs both suites + the CR gate)
 
@@ -212,12 +212,25 @@ Reset: `sudo rm -rf "/Library/Application Support/JumpCloudEnrollment"`.
 
 ## Deployment
 
-`bash build/build-package.sh` → `dist/JumpCloudEnrollment-macOS.zip` +
-`dist/MDM-Command.sh` (SHA-256 pinned). JumpCloud: Mac command,
-**Run As root**, **timeout ≥ 3900 s**, paste the command, **attach the
-zip** (attachments land in `/tmp` on macOS). Only the TENANT SETTINGS
-block at the top of the command is edited per organization; the zip stays
-tenant-neutral.
+One command, one zip:
+
+```
+bash build/build-package.sh --url https://raw.githubusercontent.com/OWNER/REPO/main/dist/JumpCloudEnrollment-macOS.zip
+```
+
+→ `dist/JumpCloudEnrollment-macOS.zip` + `dist/MDM-Command.sh` (that URL
+and the zip's SHA-256 pinned inside) + `dist/SHA256.txt`.
+
+JumpCloud: Mac command, **Run As root**, **timeout ≥ 3900 s**, paste the
+command. Nothing is attached — the command downloads the zip, verifies it
+against the pin and runs it. Attaching the zip still works and takes
+precedence, so leave `PACKAGE_URL` empty for an attachment-only tenant.
+
+The pin lives in the command text, not the package, so a tampered or
+stale download is refused. Downloads are HTTPS-only. **Re-run the build
+and re-paste the command whenever the zip changes**, or the hash check
+will correctly fail. Only the TENANT SETTINGS block at the top is edited
+per organization; the zip stays tenant-neutral.
 
 A real MDM run genuinely binds the device and sets the primary user —
 only run it against a Mac you intend to enroll.

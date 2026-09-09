@@ -16,20 +16,30 @@ Runtime uses only: `osascript`, `curl`, `sed`, `grep`, `tr`, `head`,
 `ldapwhoami`/`ldapsearch`. The build additionally uses `zip`/`shasum`.
 **Do not introduce an interpreter dependency.**
 
-## The UI (`lib/jc-ui.js`)
+## The UI (`lib/jc-ui.js` + `user/ui-host.sh`)
 
 A native **AppKit** renderer driven through `osascript -l JavaScript`
 (JXA), present on every macOS. It draws the same card design as Windows:
 rounded white card + shadow, brand accent, typography scale, numbered
 "What happens next" step card, native spinner, show/hide password.
 
-- Input: one JSON "screen spec" as argv[0].
-- Output: `{"button":0|1,"fields":{...}}` on stdout.
-- Exit: 0 = button1, 1 = button2, 2 = closed/dismissed.
+**ONE window for the whole flow.** Root cannot draw in the user's GUI
+session, so `user/ui-host.sh` runs as the console user and keeps a single
+renderer alive in `--server` mode. The card is swapped and the window
+resized with its **top edge pinned**, so it reads as one panel changing
+rather than a new window per step.
+
+- one-shot: `argv[0]` = a JSON spec. stdout = one JSON result. Exit
+  0 = button1, 1 = button2, 2 = dismissed. Used for previews.
+- server: `argv[0]` = `--server`. One JSON spec per line on stdin, one
+  JSON result per line on stdout. `{"quit":true}` ends it.
 - Spec keys: `screen, company, accent, title, message, error, note,
-  reference, support, footer, steps[], back,
-  fields[{key,label,secure,value,placeholder}],
-  button1, button2, icon(link|lock|warn|error|info|check)`.
+  reference, support, footer, steps[], back, until,
+  fields[{key,label,secure,value,placeholder}], button1, button2,
+  icon(link|lock|warn|error|info|check)`.
+- `"screen":"progress"` also takes `"until":<path>` and stays up, spinner
+  running, until that file appears; its result is `{"button":-3}`. That is
+  how root shows progress while it works, with no second window.
 
 **Reference screenshots of the Windows UI** — the design target — are in
 `docs/windows-reference/*.png` (welcome, account entry, progress,
@@ -38,7 +48,13 @@ success, auth failed, bind failed, blocked). Match these.
 Preview any screen instantly:
 
 ```
-osascript -l JavaScript lib/jc-ui.js '{"company":"Acme","accent":"#0E8A5F","icon":"lock","title":"Welcome to JumpCloud","message":"Test message.","button1":"Link My JumpCloud Account","button2":"Remind Me Later"}'
+osascript -l JavaScript lib/jc-ui.js '{"company":"Acme","accent":"#0E8A5F","icon":"link","title":"Welcome to JumpCloud","message":"Test message.","button1":"Link My JumpCloud Account","button2":"Remind Me Later"}'
+```
+
+Click through the whole flow without root:
+
+```
+./tests/preview-flow.sh
 ```
 
 ## Flow (matches Windows)
@@ -48,30 +64,33 @@ osascript -l JavaScript lib/jc-ui.js '{"company":"Acme","accent":"#0E8A5F","icon
 `UNAVAILABLE`, `CLOSED`.
 
 `CREDENTIALS` is **one screen collecting work email AND password**
-together (Windows parity), owned by `user/verify-credentials.sh` running
-as the console user. Because root holds the API key, the two exchange
-non-secret messages via file IPC while the helper keeps the password:
+together (Windows parity), owned by `user/ui-host.sh` running as the
+console user. Because root holds the API key, the two exchange
+non-secret messages over FIFOs while the host keeps the password:
 
 ```
-helper -> root : $JC_IPC_DIR/email.req   (entered email)
-root -> helper : $JC_IPC_DIR/user.resp   (JumpCloud username, or NONE)
+root -> host : SCREEN/PROGRESS/PROGRESS_WAIT/CREDENTIALS/QUIT  ($JC_IPC_DIR/cmd)
+host -> root : BUTTON n / PROGRESS_DONE / TOKEN <status> / BYE ($JC_IPC_DIR/resp)
+host -> root : $JC_IPC_DIR/email.req   (entered email)
+root -> host : $JC_IPC_DIR/user.resp   (JumpCloud username, or NONE)
 ```
 
-Root serves that lookup inside `run_credentials_step` in `jc-enroll.sh`
+Root serves that lookup inside `ui_credentials_step` in `lib/ui.sh`
 (deliberately NOT called via `$( )` — it must set globals).
 
 ## Layout
 
 - `jc-enroll.sh` — root orchestrator / state machine (entry point).
-- `lib/jc-ui.js` — native AppKit renderer (the UI).
+- `lib/jc-ui.js` — native AppKit renderer (the UI); one-shot and --server.
 - `lib/ui.sh` — screen wrappers that call the renderer as the console user.
 - `lib/config.sh` — GENERIC defaults; tenant values arrive as env vars.
 - `lib/preflight.sh` — already-bound precheck, console-user wait, Secure
   Token gate, defer/completion state.
 - `lib/jcapi.sh` — JumpCloud REST (ported from the proven `jc_bind.sh`).
 - `lib/logging.sh` — `/var/log/jc_enroll.log` (0600), emails masked.
-- `user/verify-credentials.sh` — console-user process: credential screen
-  + LDAPS bind; returns ONLY a status token.
+- `user/ui-host.sh` — console-user process: owns the single window and
+  the long-lived renderer; credential screen + LDAPS bind; returns ONLY a
+  status token.
 - `build/build-package.sh` — emits `dist/` (zip + MDM-Command.sh + hash).
 - `tests/` — `test-units.sh`, `test-flow.sh`, `dry-run.sh`.
 
@@ -79,7 +98,7 @@ Root serves that lookup inside `run_credentials_step` in `jc-enroll.sh`
 
 First bring-up on real Mac hardware is done. Both suites are green:
 
-- `tests/test-units.sh` — 57 pass / 0 fail
+- `tests/test-units.sh` — 65 pass / 0 fail
 - `tests/test-flow.sh`  — 31 pass / 0 fail
 - `bash build/build-package.sh` passes (runs both suites + the CR gate)
 
@@ -117,7 +136,7 @@ deliberately written without it. After the first screen, "Remind Me
 Later" and any binding failure aborted the script instead of reaching
 `DEFERRED` / `BIND_FAILED`. Never re-enable errexit there.
 
-`user/verify-credentials.sh` — `json_field` used `"([^"]*)"`, which
+`json_field` (now in `user/ui-host.sh`) used `"([^"]*)"`, which
 truncated any password containing `"` or `\` (the renderer escapes both),
 so correct passwords failed the LDAP bind. It now walks the value and
 undoes the escapes, in pure bash 3.2.
@@ -127,7 +146,7 @@ they were written, because the stubs modelled the *documented* contract
 rather than the shipped behaviour):
 
 7. `lib/jc-ui.js` exited **0 for both buttons** (`result.button < 0 ? 2 : 0`),
-   but `lib/ui.sh` and `user/verify-credentials.sh` tell the buttons apart
+   but `lib/ui.sh` and the console-user host tell the buttons apart
    by exit status. Every secondary button - "Remind Me Later", "I'll Sign
    Out Later", "Close", "Back" - was therefore read as the primary one, so
    deferring still walked into the credential screen and "Sign Out Later"
@@ -167,7 +186,7 @@ Reset: `sudo rm -rf "/Library/Application Support/JumpCloudEnrollment"`.
 2. **LF line endings only.** CRLF gives `bad interpreter: /bin/bash^M`.
    The build gate rejects any CR.
 3. **The password never reaches root.** Screen + bind both live in
-   `user/verify-credentials.sh`; the password reaches LDAP tools via a
+   `user/ui-host.sh`; the password reaches LDAP tools via a
    **FIFO** — never `-w` (ps-visible), never `-y <file>` (on disk).
 4. **No plaintext LDAP.** 636 = LDAPS, 389 = StartTLS (`-ZZ`),
    `LDAPTLS_REQCERT=demand`. No silent fallback.

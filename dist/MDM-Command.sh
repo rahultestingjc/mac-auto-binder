@@ -35,7 +35,7 @@ REQUIRE_SECURE_TOKEN=1                 # gate on the JC service account
 SHOW_BLOCKED_SCREEN=0                  # 1 = tell the user when blocked
 # ================================================================
 
-ZIP_SHA256="98778a24c442cbbab46b6bd6ca287755fe698440f928838007a70c551a40d0c9"
+ZIP_SHA256="d9b208eb618b156527fc84f0af9046e378536006c6ccc1fed6872d2ac33e8cf9"
 ZIP_NAME="JumpCloudEnrollment-macOS.zip"
 APP_DIR="/Library/Application Support/JumpCloudEnrollment/app"
 

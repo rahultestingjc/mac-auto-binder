@@ -201,10 +201,10 @@ PRIMARY_USER_ID="0"; jc_already_bound; assert_eq "$?" "1" 'zero primary user -> 
 PRIMARY_USER_ID="abc"; jc_already_bound; assert_eq "$?" "0" 'set primary user -> already bound'
 
 printf '\n--- json_field: renderer result parsing ---\n'
-# json_field lives inside the helper (which runs top-level code on load), so
+# json_field lives inside the UI host (which runs top-level code on load), so
 # the test lifts just that function out and sources it.
 JF="$(mktemp)"
-sed -n '/^json_field() {/,/^}/p' "$ROOT/user/verify-credentials.sh" > "$JF"
+sed -n '/^json_field() {/,/^}/p' "$ROOT/user/ui-host.sh" > "$JF"
 . "$JF"
 # What lib/jc-ui.js actually emits for the password  a"b\c d
 JRES='{"button":0,"fields":{"email":"a@b.com","password":"a\"b\\c d"}}'
@@ -245,137 +245,211 @@ else
     printf '  SKIP  renderer exit-code contract (needs macOS + osascript)\n'
 fi
 
-printf '\n--- progress window is killed, not just its wrapper ---\n'
-# ui_progress_start goes through `launchctl asuser`, which FORKS: $! is a
-# wrapper, not the process drawing the window. Killing only the wrapper left
-# the "Linking your account..." window up for the rest of the session.
-if [[ "$(uname)" == "Darwin" ]]; then
-    PSTUB="$(mktemp -d)"
-    cat > "$PSTUB/launchctl" <<'STUB'
-#!/bin/bash
-[[ "${1:-}" == "asuser" ]] && shift 2
-"$@" &
-wait $!
-STUB
-    cat > "$PSTUB/sudo" <<'STUB'
-#!/bin/bash
-[[ "${1:-}" == "-u" ]] && shift 2
-exec "$@"
-STUB
-    cat > "$PSTUB/osascript" <<'STUB'
-#!/bin/bash
-exec sleep 30
-STUB
-    chmod +x "$PSTUB"/*
-    . "$ROOT/lib/ui.sh"
-    LIB_DIR="$ROOT/lib"
-    CONSOLE_USER="$(id -un)"; CONSOLE_UID="$(id -u)"
-    COMPANY_NAME="Test"; ACCENT_COLOR="#0E8A5F"
-    ui_init >/dev/null 2>&1
-    SAVED_PATH="$PATH"; PATH="$PSTUB:$PATH"
-    ui_progress_start "Linking your account to this Mac..."
-    i=0
-    while (( i < 40 )); do
-        [[ -s "${UI_PROGRESS_PIDFILE:-/nonexistent}" ]] && break
-        sleep 0.1; i=$((i + 1))
-    done
-    PROG_PID="$(cat "$UI_PROGRESS_PIDFILE" 2>/dev/null)"
-    WRAP_PID="$UI_PROGRESS_PID"
-    if [[ "$PROG_PID" =~ ^[0-9]+$ ]]; then
-        assert true 'renderer PID is recorded'
+printf '\n--- renderer server mode (real lib/jc-ui.js, one window) ---\n'
+# The whole single-window design rests on one renderer process serving many
+# screens. Progress screens end on their own when the "until" file appears,
+# so this drives the REAL renderer end to end without needing a click.
+if [[ "$(uname)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
+    SD="$(mktemp -d)"
+    mkfifo "$SD/in" "$SD/out"
+    osascript -l JavaScript "$ROOT/lib/jc-ui.js" --server < "$SD/in" > "$SD/out" 2>"$SD/err" &
+    SRV_PID=$!
+    exec 7<> "$SD/in"
+    exec 8<> "$SD/out"
+    srv_recv() { local l; if IFS= read -r -t 25 l <&8; then printf '%s' "$l"; else printf '<TIMEOUT>'; fi; }
+
+    printf '{"company":"T","screen":"progress","title":"Verifying...","until":"%s"}\n' "$SD/s1" >&7
+    sleep 0.6
+    kill -0 "$SRV_PID" 2>/dev/null && assert true 'renderer stays up during a progress screen' \
+                                   || assert false 'renderer stays up during a progress screen'
+    touch "$SD/s1"
+    assert_eq "$(srv_recv)" '{"button":-3,"fields":{}}' 'progress ends when its signal file appears'
+
+    # A second, taller screen must reuse the SAME process (one window).
+    printf '{"company":"T","screen":"progress","title":"Linking your account to this Mac...","message":"A longer message so the card has to grow.","support":"Managed by T.","until":"%s"}\n' "$SD/s2" >&7
+    sleep 0.6
+    kill -0 "$SRV_PID" 2>/dev/null && assert true 'the same process serves the next screen' \
+                                   || assert false 'the same process serves the next screen'
+    touch "$SD/s2"
+    assert_eq "$(srv_recv)" '{"button":-3,"fields":{}}' 'second screen answers on the same connection'
+
+    printf '{"quit":true}\n' >&7
+    sleep 1
+    if kill -0 "$SRV_PID" 2>/dev/null; then
+        kill -9 "$SRV_PID" 2>/dev/null
+        assert false 'quit ends the renderer'
     else
-        assert false 'renderer PID is recorded'
+        assert true 'quit ends the renderer'
     fi
-    [[ -n "$PROG_PID" && "$PROG_PID" != "$WRAP_PID" ]] && \
-        assert true 'wrapper PID differs from the renderer PID (as on a real Mac)' || \
-        assert false 'wrapper PID differs from the renderer PID (as on a real Mac)'
-    ui_progress_stop
-    sleep 0.4
-    if kill -0 "$PROG_PID" 2>/dev/null; then
-        kill -9 "$PROG_PID" 2>/dev/null
-        assert false 'progress window process is gone after ui_progress_stop'
-    else
-        assert true 'progress window process is gone after ui_progress_stop'
-    fi
-    PATH="$SAVED_PATH"
-    rm -rf "$PSTUB"
+    exec 7>&- 2>/dev/null || true
+    exec 8>&- 2>/dev/null || true
+    rm -rf "$SD"
 else
-    printf '  SKIP  progress-window kill (needs macOS)\n'
+    printf '  SKIP  renderer server mode (needs macOS + osascript)\n'
 fi
 
-printf '\n--- credential helper: simulation tokens ---\n'
-# The helper now renders through lib/jc-ui.js via `osascript`, so the stub
-# speaks the renderer's JSON protocol and is placed on PATH (the helper
-# calls osascript unqualified precisely so this is possible).
-VSTUBS="$(mktemp -d)"; VIPC="$(mktemp -d)"
-cat > "$VSTUBS/osascript" <<'STUBEOF'
+printf '\n--- UI host: one window drives the whole flow ---\n'
+# The host is the console-user half of the UI: it owns one long-lived
+# renderer and the credential step, so the password never reaches root.
+# These drive it over its real FIFO protocol with a stubbed renderer.
+if [[ "$(uname)" == "Darwin" ]] || command -v mkfifo >/dev/null 2>&1; then
+HDIR="$(mktemp -d)"
+mkdir -p "$HDIR/bin"
+cat > "$HDIR/bin/osascript" <<'STUBEOF'
 #!/bin/bash
-# A progress screen is a transient window with no result - it must never
-# answer with credentials.
-for a in "$@"; do
-    case "$a" in
-        *'"screen":"progress"'*) exit 0 ;;
-    esac
+# Renderer stand-in speaking the --server line protocol.
+srv=0
+for a in "$@"; do [[ "$a" == "--server" ]] && srv=1; done
+(( srv )) || exit 0
+while IFS= read -r spec; do
+    case "$spec" in *'"quit":true'*) exit 0 ;; esac
+    [[ -z "$spec" ]] && continue
+    printf '%s\n' "$spec" >> "${STUB_SPEC_LOG:-/dev/null}"
+    if [[ "$spec" == *'"screen":"progress"'* ]]; then
+        u="$(printf '%s' "$spec" | sed -n 's/.*"until":"\([^"]*\)".*/\1/p')"
+        i=0
+        while [[ -n "$u" && ! -f "$u" && $i -lt 900 ]]; do sleep 0.1; i=$((i + 1)); done
+        printf '{"button":-3,"fields":{}}\n'
+        continue
+    fi
+    q="${STUB_OSA_QUEUE:-/dev/null}"
+    line="$(head -n1 "$q" 2>/dev/null)"
+    if [[ -n "$line" ]]; then
+        tail -n +2 "$q" > "${q}.tmp" 2>/dev/null && mv "${q}.tmp" "$q"
+        printf '%s\n' "$line"
+    else
+        printf '{"button":-1,"fields":{}}\n'
+    fi
 done
-printf '{"button":0,"fields":{"email":"a@b.io","password":"pw"}}\n'
-exit 0
 STUBEOF
-chmod +x "$VSTUBS/osascript"
+chmod +x "$HDIR/bin/osascript"
 
-# Stand in for root's half of the file IPC: answer email.req with a
-# username, exactly as run_credentials_step does.
-ipc_responder() {
-    local dir="$1" name="$2" i=0
+HOST_PID=""
+host_start() {   # host_start <simulate> [queue-lines...]
+    local sim="$1"; shift
+    HIPC="$HDIR/ipc.$RANDOM"; mkdir -p "$HIPC"
+    HQUEUE="$HDIR/queue.$RANDOM"; : > "$HQUEUE"
+    HSPECS="$HDIR/specs.$RANDOM"; : > "$HSPECS"
+    for l in "$@"; do printf '%s\n' "$l" >> "$HQUEUE"; done
+    mkfifo "$HIPC/cmd" "$HIPC/resp"
+    PATH="$HDIR/bin:$PATH" \
+    STUB_OSA_QUEUE="$HQUEUE" STUB_SPEC_LOG="$HSPECS" \
+    JC_UI_JS="$ROOT/lib/jc-ui.js" JC_IPC_DIR="$HIPC" \
+    JC_COMPANY="Acme" JC_ACCENT="#0E8A5F" JC_SUPPORT="IT" \
+    JC_LDAP_HOST="h" JC_LDAP_PORT=636 JC_LDAP_DN_TEMPLATE="uid={username},o=x" \
+    JC_LDAP_TIMEOUT=5 JC_REQUIRE_SECURE=1 JC_RESOLVE_TIMEOUT=10 \
+    JC_SIMULATE="$sim" \
+        bash "$ROOT/user/ui-host.sh" > "$HDIR/host.out" 2>"$HDIR/host.err" &
+    HOST_PID=$!
+    exec 7<> "$HIPC/cmd"
+    exec 8<> "$HIPC/resp"
+}
+host_send() { printf '%s\n' "$*" >&7; }
+host_recv() { local l; if IFS= read -r -t 8 l <&8; then printf '%s' "$l"; else printf '<TIMEOUT>'; fi; }
+host_stop() {
+    host_send "QUIT"; host_recv >/dev/null
+    exec 7>&- 2>/dev/null || true
+    exec 8>&- 2>/dev/null || true
+    kill "$HOST_PID" 2>/dev/null; wait "$HOST_PID" 2>/dev/null
+}
+# Root's half of the email -> username lookup.
+serve_lookup() {
+    local name="$1" i=0
     while (( i < 100 )); do
-        if [[ -f "$dir/email.req" ]]; then
-            printf '%s' "$name" > "$dir/user.resp"
-            return 0
+        if [[ -f "$HIPC/email.req" ]]; then
+            printf '%s' "$name" > "$HIPC/user.resp"; return 0
         fi
         sleep 0.1; i=$((i + 1))
     done
     return 1
 }
 
+# --- a plain screen round-trips its button ---
+host_start "" '{"button":1,"fields":{}}'
+host_send 'SCREEN {"title":"T","button1":"One","button2":"Two"}'
+assert_eq "$(host_recv)" "BUTTON 1" 'SCREEN returns the button the user pressed'
+host_stop
+
+# --- progress stays up until the caller drops the signal file ---
+host_start ""
+SIGF="$HIPC/sig"
+host_send "PROGRESS {\"screen\":\"progress\",\"title\":\"Linking...\",\"until\":\"$SIGF\"}"
+sleep 0.6
+kill -0 "$HOST_PID" 2>/dev/null && assert true 'progress keeps the window up while root works' \
+                                || assert false 'progress keeps the window up while root works'
+touch "$SIGF"
+host_send "PROGRESS_WAIT"
+assert_eq "$(host_recv)" "PROGRESS_DONE" 'progress ends when the signal file appears'
+host_stop
+
+# --- credential step: simulation tokens ---
 for pair in "success:VERIFIED" "invalid:AUTH_FAILED" "unavailable:UNAVAILABLE" "timeout:TIMEOUT"; do
     sim="${pair%%:*}"; want="${pair##*:}"
-    rm -f "$VIPC/email.req" "$VIPC/user.resp"
-    ipc_responder "$VIPC" "jdoe" &
-    responder_pid=$!
-    got="$(PATH="$VSTUBS:$PATH" JC_SIMULATE="$sim" \
-        JC_UI_JS="$ROOT/lib/jc-ui.js" JC_IPC_DIR="$VIPC" JC_RESOLVE_TIMEOUT=10 \
-        JC_COMPANY="Acme" JC_ACCENT="#0E8A5F" JC_SUPPORT="IT" JC_PREFILL_EMAIL="" \
-        JC_LDAP_HOST="h" JC_LDAP_PORT=636 JC_LDAP_DN_TEMPLATE="uid={username},o=x" \
-        JC_LDAP_TIMEOUT=5 JC_REQUIRE_SECURE=1 \
-        bash "$ROOT/user/verify-credentials.sh" 2>/dev/null)"
-    wait "$responder_pid" 2>/dev/null
-    assert_eq "$got" "$want" "simulate '$sim' -> $want"
+    host_start "$sim" '{"button":0,"fields":{"email":"a@b.io","password":"pw"}}'
+    serve_lookup "jdoe" &
+    LK=$!
+    host_send "CREDENTIALS "
+    got="$(host_recv)"
+    wait "$LK" 2>/dev/null
+    assert_eq "$got" "TOKEN $want" "simulate '$sim' -> $want"
+    host_stop
 done
 
-printf '\n--- credential helper: IPC carries the email, never the password ---\n'
-rm -f "$VIPC/email.req" "$VIPC/user.resp"
-ipc_responder "$VIPC" "jdoe" &
-responder_pid=$!
-PATH="$VSTUBS:$PATH" JC_SIMULATE="success" \
-    JC_UI_JS="$ROOT/lib/jc-ui.js" JC_IPC_DIR="$VIPC" JC_RESOLVE_TIMEOUT=10 \
-    JC_COMPANY="Acme" JC_ACCENT="#0E8A5F" JC_SUPPORT="IT" JC_PREFILL_EMAIL="" \
-    JC_LDAP_HOST="h" JC_LDAP_PORT=636 JC_LDAP_DN_TEMPLATE="uid={username},o=x" \
-    JC_LDAP_TIMEOUT=5 JC_REQUIRE_SECURE=1 \
-    bash "$ROOT/user/verify-credentials.sh" >/dev/null 2>"$VIPC/helper.err"
-wait "$responder_pid" 2>/dev/null
-assert_eq "$(cat "$VIPC/email.req" 2>/dev/null)" "a@b.io" 'email.req carries the entered email'
-grep -q 'pw' "$VIPC/email.req" 2>/dev/null && \
-    assert false 'password never crosses the IPC' || \
-    assert true 'password never crosses the IPC'
-grep -q 'pw' "$VIPC/helper.err" 2>/dev/null && \
-    assert false 'password never reaches the helper log' || \
-    assert true 'password never reaches the helper log'
+# --- Back and a closed window are distinct terminal tokens ---
+host_start "success" '{"button":1,"fields":{}}'
+host_send "CREDENTIALS "
+assert_eq "$(host_recv)" "TOKEN BACK" 'Back on the credential screen reports BACK'
+host_stop
+host_start "success" '{"button":-1,"fields":{}}'
+host_send "CREDENTIALS "
+assert_eq "$(host_recv)" "TOKEN CANCELLED" 'a dismissed credential screen reports CANCELLED'
+host_stop
 
-printf '\n--- credential helper: refuses to run without a renderer ---\n'
-got="$(PATH="$VSTUBS:$PATH" JC_UI_JS="/nonexistent/jc-ui.js" JC_IPC_DIR="$VIPC" \
-    bash "$ROOT/user/verify-credentials.sh" 2>/dev/null)"
-assert_eq "$got" "CONFIG_ERROR" 'missing renderer -> CONFIG_ERROR'
+# --- a malformed email is re-prompted, never sent to root ---
+host_start "success" \
+    '{"button":0,"fields":{"email":"not-an-email","password":"pw"}}' \
+    '{"button":0,"fields":{"email":"good@acme.io","password":"pw"}}'
+serve_lookup "jdoe" &
+LK=$!
+host_send "CREDENTIALS "
+got="$(host_recv)"
+wait "$LK" 2>/dev/null
+assert_eq "$got" "TOKEN VERIFIED" 'malformed email is re-prompted on the same screen'
+assert_eq "$(cat "$HIPC/email.req" 2>/dev/null)" "good@acme.io" 'only the corrected email reaches root'
+host_stop
 
-rm -rf "$VSTUBS" "$VIPC"
+# --- the password never crosses to root, and never hits the log ---
+host_start "success" '{"button":0,"fields":{"email":"a@b.io","password":"hunter2"}}'
+serve_lookup "jdoe" &
+LK=$!
+host_send "CREDENTIALS "
+host_recv >/dev/null
+wait "$LK" 2>/dev/null
+host_stop
+# -type f matters: $HIPC holds the cmd/resp FIFOs, and a recursive grep
+# would block forever trying to read them.
+PW_LEAK="$(find "$HIPC" -type f -exec grep -l 'hunter2' {} + 2>/dev/null)"
+if [[ -n "$PW_LEAK" ]]; then
+    assert false 'password never crosses the IPC to root'
+else
+    assert true 'password never crosses the IPC to root'
+fi
+if grep -q 'hunter2' "$HDIR/host.err" "$HDIR/host.out" 2>/dev/null; then
+    assert false 'password never reaches the host log'
+else
+    assert true 'password never reaches the host log'
+fi
+
+# --- the host refuses to start without a renderer ---
+HIPC="$HDIR/ipc.none"; mkdir -p "$HIPC"
+PATH="$HDIR/bin:$PATH" JC_UI_JS="/nonexistent/jc-ui.js" JC_IPC_DIR="$HIPC" \
+    bash "$ROOT/user/ui-host.sh" >/dev/null 2>&1
+assert_eq "$?" "1" 'missing renderer -> host exits non-zero'
+
+rm -rf "$HDIR"
+else
+    printf '  SKIP  UI host tests (need mkfifo)\n'
+fi
 
 printf '\n--- password never appears in the log ---\n'
 grep -qi "hunter2\|password.*=" "$JC_LOG_FILE" && \

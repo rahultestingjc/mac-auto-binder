@@ -14,9 +14,10 @@
 #   LINKING  -> BIND_FAILED  -> LINKING (retry)
 #   any      -> BLOCKED / UNAVAILABLE / CLOSED
 #
-# The user's password NEVER enters this process: the credential prompt
-# and LDAP bind run in user/verify-credentials.sh as the console user,
-# which returns only a status token.
+# The user's password NEVER enters this process: the credential screen
+# and the LDAP bind run in user/ui-host.sh as the console user, which
+# returns only a status token. That host also owns the single window the
+# whole flow is drawn in.
 #
 # NOTE: `set -e` is deliberately NOT used. This is a state machine built
 # on functions that report status via return codes; -e would abort on
@@ -58,7 +59,7 @@ done
 # shellcheck source=lib/ui.sh
 . "${SCRIPT_DIR}/lib/ui.sh"
 
-VERIFY_HELPER="${SCRIPT_DIR}/user/verify-credentials.sh"
+UI_HOST_SCRIPT="${SCRIPT_DIR}/user/ui-host.sh"
 LIB_DIR="${SCRIPT_DIR}/lib"
 
 FINAL_STATUS="RequiresAction"
@@ -133,7 +134,11 @@ if ! jc_check_secure_token; then
 fi
 
 jc_info "System ID: ${SYSTEM_ID} | Base: ${JC_BASE}"
-ui_init
+UI_SIMULATE=""
+[[ "${JC_DRY_RUN}" == "1" ]] && UI_SIMULATE="${SIMULATE_LDAP:-}"
+if ! ui_init; then
+    FINAL_ISSUE="Could not start the enrollment UI"; finish
+fi
 
 # =====================================================================
 # State machine
@@ -142,71 +147,11 @@ STATE="WELCOME"
 EMAIL=""
 BIND_FAIL_REASON=""
 
-# Runs the credential step in the console user's session. The helper
-# owns the single email+password screen (Windows parity) and the LDAP
-# bind; this side only answers its email -> username lookup, because
-# root holds the API key. The password never crosses this boundary.
-#
-# NOT called via $( ) - it must set globals (VERIFY_TOKEN, EMAIL,
-# JC_USER_ID, JC_USERNAME), which a subshell would discard.
+# The credential step lives in lib/ui.sh (ui_credentials_step): the host
+# owns the single email+password screen and the LDAP bind, and this side
+# only answers its email -> username lookup, because root holds the API
+# key. The password never crosses that boundary.
 VERIFY_TOKEN=""
-run_credentials_step() {
-    local sim="" out_file helper_pid served=0 ipc
-    [[ "${JC_DRY_RUN}" == "1" ]] && sim="${SIMULATE_LDAP:-}"
-
-    ipc="${JC_STATE_DIR}/ipc"
-    rm -rf "$ipc" 2>/dev/null || true
-    mkdir -p "$ipc"
-    chown "$CONSOLE_USER" "$ipc" 2>/dev/null || true
-    chmod 700 "$ipc" 2>/dev/null || true
-
-    out_file="$(mktemp /private/tmp/jc_token.XXXXXX)"
-    chmod 600 "$out_file"
-    chmod 755 "$VERIFY_HELPER" 2>/dev/null || true
-
-    launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" /usr/bin/env \
-        JC_UI_JS="${LIB_DIR}/jc-ui.js" \
-        JC_COMPANY="${COMPANY_NAME}" \
-        JC_ACCENT="${ACCENT_COLOR:-#0E8A5F}" \
-        JC_SUPPORT="${SUPPORT_CONTACT}" \
-        JC_PREFILL_EMAIL="${EMAIL}" \
-        JC_IPC_DIR="${ipc}" \
-        JC_LDAP_HOST="${LDAP_HOST}" \
-        JC_LDAP_PORT="${LDAP_PORT}" \
-        JC_LDAP_DN_TEMPLATE="${LDAP_USER_DN_TEMPLATE}" \
-        JC_LDAP_TIMEOUT="${LDAP_TIMEOUT}" \
-        JC_REQUIRE_SECURE="${LDAP_REQUIRE_SECURE}" \
-        JC_SIMULATE="${sim}" \
-        "$VERIFY_HELPER" >"$out_file" 2>>"$JC_LOG_FILE" &
-    helper_pid=$!
-
-    # Serve the lookup while the helper still holds the password.
-    while kill -0 "$helper_pid" 2>/dev/null; do
-        if [[ $served -eq 0 && -f "${ipc}/email.req" ]]; then
-            EMAIL="$(head -n1 "${ipc}/email.req" 2>/dev/null | tr -d '\r\n')"
-            jc_info "Email captured: $(jc_mask_email "$EMAIL")"
-            if [[ "${JC_DRY_RUN}" == "1" ]]; then
-                JC_USER_ID="dryrun-user-id"
-                JC_USERNAME="${CONSOLE_USER}"
-            else
-                if ! jc_find_user_by_email "$EMAIL"; then
-                    # Unknown email: answer NONE. The helper still fails
-                    # with the same token as a bad password.
-                    JC_USER_ID=""
-                    JC_USERNAME=""
-                fi
-            fi
-            printf '%s' "${JC_USERNAME:-NONE}" > "${ipc}/user.resp" 2>/dev/null || true
-            served=1
-        fi
-        sleep 1
-    done
-    wait "$helper_pid" 2>/dev/null || true
-
-    VERIFY_TOKEN="$(head -n1 "$out_file" 2>/dev/null)"
-    rm -f "$out_file"
-    rm -rf "$ipc" 2>/dev/null || true
-}
 
 while true; do
     case "$STATE" in
@@ -223,7 +168,7 @@ while true; do
 
     CREDENTIALS)
         jc_info "State -> CREDENTIALS (single email+password screen)"
-        run_credentials_step
+        ui_credentials_step
         jc_info "Verification result: ${VERIFY_TOKEN:-<empty>}"
         case "$VERIFY_TOKEN" in
             VERIFIED)

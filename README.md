@@ -38,7 +38,7 @@ explicit state machine.
    **Enrollment is unavailable**.
 
 Email and password share one screen, and that screen is owned by
-`user/verify-credentials.sh` running as the console user, so neither the
+`user/ui-host.sh` running as the console user, so neither the
 password nor the LDAP bind ever enters the root process — see Security
 below.
 
@@ -64,9 +64,10 @@ JumpCloud command (Run As root; {{Apikey}} / {{OrgID}} / {{device.id}} /
      ├─ lib/jcapi.sh       JumpCloud REST (the original proven calls)
      ├─ lib/ui.sh          screen wrappers; run the renderer as the console user
      ├─ lib/jc-ui.js       native AppKit renderer (osascript JXA) — the UI
-     └─ user/verify-credentials.sh
-                           RUNS AS THE CONSOLE USER: password prompt +
-                           LDAPS bind; returns only a status token
+     └─ user/ui-host.sh    RUNS AS THE CONSOLE USER: owns the single
+                           window and one long-lived jc-ui.js renderer;
+                           collects email + password and does the LDAPS
+                           bind, returning only a status token
 ```
 
 State model: `WELCOME → CREDENTIALS → LINKING → SUCCESS`, with
@@ -130,10 +131,18 @@ pinned hash, so publish command + zip + hash together.
 
 There is no third-party UI dependency and no fallback path. `lib/jc-ui.js`
 is a native AppKit renderer driven through `osascript -l JavaScript`
-(JXA), present on every macOS. It takes one JSON "screen spec" as
-`argv[0]`, prints `{"button":0|1,"fields":{…}}` on stdout, and exits 0 on
-a button press or 2 when the window is dismissed.
+(JXA), present on every macOS.
 
+**One window for the whole flow.** Root cannot draw in the user's GUI
+session, so `user/ui-host.sh` runs as the console user and keeps a single
+renderer alive in `--server` mode: it reads one JSON screen spec per line
+and writes one JSON result per line, swapping the card and resizing the
+window with its top edge pinned. The card changes in place rather than a
+window closing and another opening at each step. A `"screen":"progress"`
+spec also takes `"until":<path>` and stays up, spinner running, until that
+file appears - that is how root shows progress while it works, without a
+second window. Passing a single spec as `argv[0]` instead still renders
+one screen and exits, which is what the preview command above does.
 The JXA bridge is narrower than plain AppKit, and the file's header
 documents the traps that cost real debugging time: `NSApp` is nil until
 `NSApplication.sharedApplication` is sent; assigning a `CGColorRef` to
@@ -147,7 +156,7 @@ ordering, so the constant named "center" right-aligns.
 ## Security
 
 - **The password never enters the root process.** The prompt and the
-  LDAP bind both run in `user/verify-credentials.sh` as the console
+  LDAP bind both run in `user/ui-host.sh` as the console
   user, which returns only `VERIFIED` / `AUTH_FAILED` / `UNAVAILABLE` /
   `TIMEOUT` / `CONFIG_ERROR` / `BACK` / `CANCELLED`.
 - **Never on a command line or on disk.** The password reaches
@@ -180,7 +189,7 @@ bash tests/test-units.sh
 bash tests/test-flow.sh
 ```
 
-- `test-units.sh` — 57 assertions: JSON escaping, email masking, user
+- `test-units.sh` — 65 assertions: JSON escaping, email masking, user
   lookup parsing, 5xx retry, username alignment (case-insensitive
   compare, original case sent), 409-as-success, every failure category,
   defer/completion state, the renderer-result parser, and the credential helper's status tokens.

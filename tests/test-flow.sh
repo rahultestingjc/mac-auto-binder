@@ -77,23 +77,61 @@ cat > "$STUBS/sudo" <<'EOF'
 exec "$@"
 EOF
 
-# osascript: pops the next "exitcode:stdout" line from the queue file.
+# osascript stand-in for lib/jc-ui.js.
+#
+# The real renderer now runs in --server mode: ONE process reads a screen
+# spec per line and answers a JSON result per line, so the whole flow uses
+# a single window. The stub speaks that protocol. A progress screen is not
+# a queue entry - it waits for its "until" file, exactly as the renderer's
+# timer does - or the queue would desync by one on every progress step.
 cat > "$STUBS/osascript" <<'EOF'
 #!/bin/bash
-# Stands in for the native renderer. Progress screens are transient and
-# must NOT consume a queue entry, or the queue desyncs.
+srv=0
+for a in "$@"; do [[ "$a" == "--server" ]] && srv=1; done
+
+answer_from_queue() {
+    local q line code out
+    q="${STUB_OSA_QUEUE:-/dev/null}"
+    line="$(head -n1 "$q" 2>/dev/null)"
+    if [[ -z "$line" ]]; then printf '{"button":-1,"fields":{}}\n'; return; fi
+    tail -n +2 "$q" > "${q}.tmp" 2>/dev/null && mv "${q}.tmp" "$q"
+    code="${line%%:*}"; out="${line#*:}"
+    if [[ -n "$out" ]]; then printf '%s\n' "$out"
+    else printf '{"button":%s,"fields":{}}\n' "$code"; fi
+}
+
+if (( srv )); then
+    while IFS= read -r spec; do
+        case "$spec" in
+            *'"quit":true'*) exit 0 ;;
+        esac
+        [[ -z "$spec" ]] && continue
+        if [[ "$spec" == *'"screen":"progress"'* ]]; then
+            until_path="$(printf '%s' "$spec" | sed -n 's/.*"until":"\([^"]*\)".*/\1/p')"
+            i=0
+            while [[ -n "$until_path" && ! -f "$until_path" && $i -lt 900 ]]; do
+                sleep 0.1; i=$((i + 1))
+            done
+            printf '{"button":-3,"fields":{}}\n'
+            continue
+        fi
+        answer_from_queue
+    done
+    exit 0
+fi
+
+# one-shot mode (previews and any direct caller)
 for a in "$@"; do
     case "$a" in
         *'"screen":"progress"'*) exec sleep 30 ;;
     esac
 done
-q="${STUB_OSA_QUEUE:-/dev/null}"
-line="$(head -n1 "$q" 2>/dev/null)"
+line="$(head -n1 "${STUB_OSA_QUEUE:-/dev/null}" 2>/dev/null)"
 if [[ -n "$line" ]]; then
+    q="${STUB_OSA_QUEUE}"
     tail -n +2 "$q" > "${q}.tmp" 2>/dev/null && mv "${q}.tmp" "$q"
     code="${line%%:*}"; out="${line#*:}"
-    [[ -n "$out" ]] && printf '%s
-' "$out"
+    [[ -n "$out" ]] && printf '%s\n' "$out"
     exit "$code"
 fi
 exit 0

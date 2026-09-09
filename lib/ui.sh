@@ -8,38 +8,40 @@
 # matches the Windows WPF client (rounded card, brand accent, numbered
 # step card, native spinner).
 #
-# Every screen must appear inside the console user's GUI session, so
-# each invocation goes through launchctl asuser + sudo -u.
+# ONE WINDOW FOR THE WHOLE FLOW. Root cannot draw in the user's GUI
+# session, so a single console-user process (user/ui-host.sh) owns one
+# long-lived renderer and every screen reuses its window: the card
+# changes in place instead of a window closing and another opening for
+# each step. This layer just sends it commands and reads back answers:
 #
-# This layer NEVER handles the password. The credential screen is
-# rendered by user/verify-credentials.sh, which runs as the console user
+#   SCREEN <spec>    -> BUTTON <0|1|-1>
+#   PROGRESS <spec>  -> (no reply yet; the spinner stays up)
+#   PROGRESS_WAIT    -> PROGRESS_DONE once the "until" file appears
+#   CREDENTIALS <em> -> TOKEN <status>
+#   QUIT             -> BYE
+#
+# This layer NEVER handles the password. The credential screen and the
+# LDAP bind both live in user/ui-host.sh, which runs as the console user
 # and returns only a status token - the password never reaches root.
+#
+# ERREXIT CONTRACT: jc-enroll.sh deliberately runs WITHOUT `set -e` - it
+# is a state machine whose steps report status through non-zero return
+# codes. Nothing here may switch errexit on. An earlier version wrapped
+# each render in `set +e ... set -e`, which left errexit ENABLED for the
+# rest of the run; after the first screen, "Remind Me Later" and every
+# binding failure aborted the script instead of reaching DEFERRED and
+# BIND_FAILED.
 # =====================================================================
 
-UI_PROGRESS_PID=""
 UI_RENDERER=""
-UI_LAST_JSON=""
-UI_PROGRESS_PIDFILE=""
+UI_HOST_PID=""
+UI_IPC_DIR=""
+UI_PROGRESS_SIGNAL=""
+UI_PROGRESS_ACTIVE=0
+UI_READY=0
 
 ui_as_user() {
     launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" "$@"
-}
-
-ui_init() {
-    UI_RENDERER="${LIB_DIR}/jc-ui.js"
-    if [[ ! -f "$UI_RENDERER" ]]; then
-        jc_error "UI renderer missing at ${UI_RENDERER}"
-        return 1
-    fi
-    # Readable by the console user (we run it as them).
-    chmod 644 "$UI_RENDERER" 2>/dev/null || true
-    jc_info "UI mode: native AppKit (osascript JXA)"
-    return 0
-}
-
-ui_cleanup() {
-    ui_progress_stop
-    return 0
 }
 
 # Minimal JSON string escaper (bash 3.2, no jq).
@@ -59,75 +61,176 @@ ui_common_json() {
         "$(ui_esc "${COMPANY_NAME}")" "$(ui_esc "${ACCENT_COLOR:-#0E8A5F}")"
 }
 
-# ui_render <json-spec>  ->  exit code from renderer (0 btn1, 1 btn2, 2 closed)
-# Renderer stdout (JSON) is captured in UI_LAST_JSON.
-#
-# ERREXIT CONTRACT: jc-enroll.sh deliberately runs WITHOUT `set -e` - it is
-# a state machine whose steps report status through non-zero return codes.
-# These functions must never switch errexit on. An earlier version wrapped
-# each render in `set +e ... set -e`, which left errexit ENABLED for the
-# rest of the run; after the first screen, "Remind Me Later" and every
-# binding failure aborted the script instead of reaching DEFERRED and
-# BIND_FAILED, so neither the defer state nor the failure screen happened.
+ui_send() { printf '%s\n' "$*" >&7; }
+
+ui_init() {
+    UI_RENDERER="${LIB_DIR}/jc-ui.js"
+    if [[ ! -f "$UI_RENDERER" ]]; then
+        jc_error "UI renderer missing at ${UI_RENDERER}"
+        return 1
+    fi
+    if [[ ! -f "$UI_HOST_SCRIPT" ]]; then
+        jc_error "UI host missing at ${UI_HOST_SCRIPT}"
+        return 1
+    fi
+    # Readable/runnable by the console user (we run them as that user).
+    chmod 644 "$UI_RENDERER" 2>/dev/null || true
+    chmod 755 "$UI_HOST_SCRIPT" 2>/dev/null || true
+
+    UI_IPC_DIR="${JC_STATE_DIR}/ipc"
+    rm -rf "$UI_IPC_DIR" 2>/dev/null || true
+    mkdir -p "$UI_IPC_DIR" || { jc_error "Could not create ${UI_IPC_DIR}"; return 1; }
+    if ! mkfifo -m 600 "${UI_IPC_DIR}/cmd" "${UI_IPC_DIR}/resp" 2>/dev/null; then
+        jc_error "Could not create UI control FIFOs"
+        return 1
+    fi
+    # The host runs as the console user and must own the channel.
+    chown "$CONSOLE_USER" "$UI_IPC_DIR" "${UI_IPC_DIR}/cmd" "${UI_IPC_DIR}/resp" 2>/dev/null || true
+    chmod 700 "$UI_IPC_DIR" 2>/dev/null || true
+
+    ui_as_user /usr/bin/env \
+        JC_UI_JS="$UI_RENDERER" \
+        JC_IPC_DIR="$UI_IPC_DIR" \
+        JC_COMPANY="${COMPANY_NAME}" \
+        JC_ACCENT="${ACCENT_COLOR:-#0E8A5F}" \
+        JC_SUPPORT="${SUPPORT_CONTACT}" \
+        JC_LDAP_HOST="${LDAP_HOST}" \
+        JC_LDAP_PORT="${LDAP_PORT}" \
+        JC_LDAP_DN_TEMPLATE="${LDAP_USER_DN_TEMPLATE}" \
+        JC_LDAP_TIMEOUT="${LDAP_TIMEOUT}" \
+        JC_REQUIRE_SECURE="${LDAP_REQUIRE_SECURE}" \
+        JC_SIMULATE="${UI_SIMULATE:-}" \
+        "$UI_HOST_SCRIPT" >>"$JC_LOG_FILE" 2>&1 &
+    UI_HOST_PID=$!
+
+    # <> so opening never blocks waiting for the other end to appear.
+    exec 7<> "${UI_IPC_DIR}/cmd" || { jc_error "Could not open UI command channel"; return 1; }
+    exec 8<> "${UI_IPC_DIR}/resp" || { jc_error "Could not open UI reply channel"; return 1; }
+
+    UI_READY=1
+    jc_info "UI mode: native AppKit, single window (osascript JXA server, pid ${UI_HOST_PID})"
+    return 0
+}
+
+ui_cleanup() {
+    ui_progress_stop
+    if [[ "$UI_READY" == "1" ]]; then
+        ui_send "QUIT" 2>/dev/null || true
+        local bye
+        IFS= read -r -t 10 bye <&8 2>/dev/null || true
+        exec 7>&- 2>/dev/null || true
+        exec 8>&- 2>/dev/null || true
+        UI_READY=0
+    fi
+    if [[ -n "$UI_HOST_PID" ]]; then
+        kill "$UI_HOST_PID" >/dev/null 2>&1 || true
+        wait "$UI_HOST_PID" 2>/dev/null || true
+        UI_HOST_PID=""
+    fi
+    [[ -n "$UI_IPC_DIR" ]] && rm -rf "$UI_IPC_DIR" 2>/dev/null || true
+    return 0
+}
+
+# ui_render <json-spec> -> 0 = button1, 1 = button2, 2 = closed/dismissed
 ui_render() {
-    local spec="$1" rc
-    UI_LAST_JSON=""
-    UI_LAST_JSON="$(ui_as_user osascript -l JavaScript "$UI_RENDERER" "$spec" 2>/dev/null)"
-    rc=$?
-    return $rc
+    local spec="$1" reply btn
+    [[ "$UI_READY" == "1" ]] || return 2
+    ui_send "SCREEN ${spec}"
+    if ! IFS= read -r -t 3900 reply <&8; then
+        jc_error "UI host did not answer; treating the screen as dismissed."
+        return 2
+    fi
+    btn="${reply#BUTTON }"
+    case "$btn" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) return 2 ;;
+    esac
 }
 
 # ---------------------------------------------------------------------
-# Progress overlay - runs in the background; killed when the step ends.
+# Progress overlay - the SAME window, showing a spinner. It stays up
+# until ui_progress_stop drops the signal file the renderer watches, so
+# root can work while it spins without a second window appearing.
 # ---------------------------------------------------------------------
 ui_progress_start() {
     local msg="$1" spec
     ui_progress_stop
-
-    # `launchctl asuser` FORKS, so $! is a wrapper PID, not the process that
-    # owns the window - killing it left the progress window on screen for the
-    # rest of the session. Have the console-user shell record its own PID and
-    # then `exec` the renderer in place, so the file holds the PID that
-    # actually draws the window. (The stubs in tests/ use exec, which is why
-    # the old code passed there and failed on a real Mac.)
-    UI_PROGRESS_PIDFILE="$(mktemp /private/tmp/jc_prog.XXXXXX)"
-    chmod 644 "$UI_PROGRESS_PIDFILE" 2>/dev/null || true
-    chown "$CONSOLE_USER" "$UI_PROGRESS_PIDFILE" 2>/dev/null || true
-
-    spec="{$(ui_common_json),\"screen\":\"progress\",\"title\":\"$(ui_esc "$msg")\",\"message\":\"This usually takes less than a minute. Please keep this window open.\"}"
-    # osascript stays unqualified so tests can stub it.
-    ui_as_user /bin/bash -c 'printf "%s" "$$" > "$1"; exec osascript -l JavaScript "$2" "$3"' \
-        jc-progress "$UI_PROGRESS_PIDFILE" "$UI_RENDERER" "$spec" >/dev/null 2>&1 &
-    UI_PROGRESS_PID=$!
+    [[ "$UI_READY" == "1" ]] || return 0
+    UI_PROGRESS_SIGNAL="${UI_IPC_DIR}/progress.$$.${RANDOM}"
+    rm -f "$UI_PROGRESS_SIGNAL" 2>/dev/null || true
+    spec="{$(ui_common_json),\"screen\":\"progress\",\"title\":\"$(ui_esc "$msg")\""
+    spec="${spec},\"message\":\"This usually takes less than a minute. Please keep this window open.\""
+    spec="${spec},\"until\":\"$(ui_esc "$UI_PROGRESS_SIGNAL")\"}"
+    ui_send "PROGRESS ${spec}"
+    UI_PROGRESS_ACTIVE=1
 }
 
 ui_progress_update() {
-    # Each screen is its own modal window, so an update is a restart.
+    # Same window; an update is just the next progress screen.
     ui_progress_start "$1"
 }
 
 ui_progress_stop() {
-    local pid waited=0
-    if [[ -n "${UI_PROGRESS_PIDFILE:-}" ]]; then
-        # A very fast step can finish before the helper has written its PID.
-        while (( waited < 20 )); do
-            [[ -s "$UI_PROGRESS_PIDFILE" ]] && break
-            kill -0 "${UI_PROGRESS_PID:-0}" 2>/dev/null || break
-            sleep 0.1
-            waited=$((waited + 1))
-        done
-        pid="$(head -n1 "$UI_PROGRESS_PIDFILE" 2>/dev/null)"
-        if [[ "$pid" =~ ^[0-9]+$ ]]; then
-            kill "$pid" >/dev/null 2>&1 || true
-        fi
-        rm -f "$UI_PROGRESS_PIDFILE" 2>/dev/null || true
-        UI_PROGRESS_PIDFILE=""
-    fi
-    [[ -z "${UI_PROGRESS_PID:-}" ]] && return 0
-    kill "$UI_PROGRESS_PID" >/dev/null 2>&1 || true
-    wait "$UI_PROGRESS_PID" 2>/dev/null || true
-    UI_PROGRESS_PID=""
+    [[ "${UI_PROGRESS_ACTIVE:-0}" == "1" ]] || return 0
+    local done_reply
+    touch "$UI_PROGRESS_SIGNAL" 2>/dev/null || true
+    ui_send "PROGRESS_WAIT"
+    IFS= read -r -t 60 done_reply <&8 2>/dev/null || true
+    rm -f "$UI_PROGRESS_SIGNAL" 2>/dev/null || true
+    UI_PROGRESS_ACTIVE=0
     return 0
+}
+
+# ---------------------------------------------------------------------
+# Credential step - the host owns the screen AND the LDAP bind, so the
+# password never crosses into this process. Root only answers the
+# email -> JumpCloud username lookup, because it holds the API key.
+#
+# NOT called via $( ): it must set globals (VERIFY_TOKEN, EMAIL,
+# JC_USER_ID, JC_USERNAME), which a subshell would discard.
+# ---------------------------------------------------------------------
+ui_credentials_step() {
+    local reply="" served=0
+    VERIFY_TOKEN=""
+    [[ "$UI_READY" == "1" ]] || { VERIFY_TOKEN="CONFIG_ERROR"; return 0; }
+    rm -f "${UI_IPC_DIR}/email.req" "${UI_IPC_DIR}/user.resp" 2>/dev/null || true
+    ui_send "CREDENTIALS ${EMAIL}"
+
+    while true; do
+        if [[ $served -eq 0 && -f "${UI_IPC_DIR}/email.req" ]]; then
+            EMAIL="$(head -n1 "${UI_IPC_DIR}/email.req" 2>/dev/null | tr -d '\r\n')"
+            jc_info "Email captured: $(jc_mask_email "$EMAIL")"
+            if [[ "${JC_DRY_RUN}" == "1" ]]; then
+                JC_USER_ID="dryrun-user-id"
+                JC_USERNAME="${CONSOLE_USER}"
+            else
+                if ! jc_find_user_by_email "$EMAIL"; then
+                    # Unknown email: answer NONE. The host still fails with
+                    # the same token as a bad password.
+                    JC_USER_ID=""
+                    JC_USERNAME=""
+                fi
+            fi
+            printf '%s' "${JC_USERNAME:-NONE}" > "${UI_IPC_DIR}/user.resp" 2>/dev/null || true
+            served=1
+        fi
+        if IFS= read -r -t 2 reply <&8; then
+            [[ -n "$reply" ]] && break
+        fi
+        if ! kill -0 "$UI_HOST_PID" 2>/dev/null; then
+            jc_error "UI host exited during the credential step."
+            VERIFY_TOKEN=""
+            return 0
+        fi
+    done
+    VERIFY_TOKEN="${reply#TOKEN }"
+    rm -f "${UI_IPC_DIR}/email.req" "${UI_IPC_DIR}/user.resp" 2>/dev/null || true
+    return 0
+}
+
+ui_valid_email() {
+    [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
 }
 
 # ---------------------------------------------------------------------
@@ -159,9 +262,6 @@ ui_welcome() {
     esac
 }
 
-ui_valid_email() {
-    [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
-}
 
 # ---------------------------------------------------------------------
 # Result screens

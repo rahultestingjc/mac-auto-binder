@@ -71,6 +71,26 @@ printf '\n--- json_escape ---\n'
 assert_eq "$(json_escape 'a"b\c')" 'a\"b\\c' 'escapes quotes and backslashes'
 assert_eq "$(json_escape "$(printf 'x\ty')")" 'x\ty' 'escapes tabs'
 
+printf '\n--- LDAP DN template ---\n'
+# This was written as `: "${LDAP_USER_DN_TEMPLATE:=uid={username},...}"`.
+# Inside ${VAR:=word} the first unescaped } ENDS the expansion, so the value
+# silently became "uid={username" - no closing brace. The host's "must
+# contain {username}" check then failed and EVERY verification returned
+# CONFIG_ERROR ("we couldn't reach the verification service") without ever
+# attempting an LDAP bind.
+assert_eq "$LDAP_USER_DN_TEMPLATE" \
+    'uid={username},ou=Users,o=org123,dc=jumpcloud,dc=com' \
+    'DN template is complete, not truncated at the first brace'
+case "$LDAP_USER_DN_TEMPLATE" in
+    *"{username}"*) assert true  'DN template keeps the {username} placeholder' ;;
+    *)              assert false 'DN template keeps the {username} placeholder' ;;
+esac
+( export ORG_ID=o2 LDAP_USER_DN_TEMPLATE='cn={username},dc=custom'
+  . "$ROOT/lib/config.sh"
+  [[ "$LDAP_USER_DN_TEMPLATE" == 'cn={username},dc=custom' ]] ) \
+    && assert true 'an explicit DN template still overrides the default' \
+    || assert false 'an explicit DN template still overrides the default'
+
 printf '\n--- jc_mask_email ---\n'
 assert_eq "$(jc_mask_email 'rahul@example.com')" 'ra***@example.com' 'masks local part'
 assert_eq "$(jc_mask_email 'ab@x.io')" 'a*@x.io' 'two-char local part is masked'

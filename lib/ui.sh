@@ -240,13 +240,15 @@ ui_welcome() {
     local rc msg spec
     msg="${COMPANY_NAME} uses JumpCloud to securely manage identity and access to company resources. To provide a seamless sign-in experience, link your JumpCloud account with this Mac."
 
-    # No "Remind Me Later": there is no snooze and no local state. Whether
-    # this runs at all is decided solely by primary_user_id in the MDM
-    # command. Closing the window just ends this run.
+    # "Remind Me Later" is only a way out of the window - it ends this run
+    # and writes NOTHING. There is no snooze and no local state: whether
+    # this runs again is decided solely by primary_user_id in the MDM
+    # command, plus whatever schedule the command is on.
     spec="{$(ui_common_json),\"icon\":\"link\",\"title\":\"Welcome to JumpCloud\""
     spec="${spec},\"message\":\"$(ui_esc "$msg")\""
     spec="${spec},\"footer\":\"Once linked, your JumpCloud password becomes your Mac login password.\""
     spec="${spec},\"button1\":\"Link My JumpCloud Account\""
+    spec="${spec},\"button2\":\"Remind Me Later\""
     spec="${spec},\"support\":\"Managed by $(ui_esc "${COMPANY_NAME}"). Questions? Contact $(ui_esc "${SUPPORT_CONTACT}").\"}"
 
     ui_render "$spec"; rc=$?

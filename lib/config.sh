@@ -26,7 +26,16 @@ fi
 : "${LDAP_PORT:=636}"                 # 636 = LDAPS, 389 = StartTLS
 : "${LDAP_TIMEOUT:=15}"
 # {username} is substituted with the JumpCloud username resolved by the API.
-: "${LDAP_USER_DN_TEMPLATE:=uid={username},ou=Users,o=${ORG_ID},dc=jumpcloud,dc=com}"
+#
+# NOT written as `: "${LDAP_USER_DN_TEMPLATE:=uid={username},...}"`. Inside
+# ${VAR:=word} the first unescaped } ENDS the expansion, so that form
+# silently assigned the truncated "uid={username" - no closing brace, so the
+# host's "must contain {username}" check failed and every verification
+# returned CONFIG_ERROR ("we couldn't reach the verification service")
+# without ever attempting the LDAP bind. A plain assignment has no such trap.
+if [[ -z "${LDAP_USER_DN_TEMPLATE:-}" ]]; then
+    LDAP_USER_DN_TEMPLATE="uid={username},ou=Users,o=${ORG_ID},dc=jumpcloud,dc=com"
+fi
 # Hard safety switch: unencrypted LDAP is refused outright, always.
 : "${LDAP_REQUIRE_SECURE:=1}"
 

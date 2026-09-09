@@ -19,7 +19,8 @@ explicit state machine.
 
 ## What the user sees
 
-   *Link My JumpCloud Account*. Closing the window just ends this run.
+   *Link My JumpCloud Account* / *Remind Me Later*. "Remind Me Later" is
+   only a way out of the window: it ends the run and writes nothing.
 2. **Verify your JumpCloud account** — one screen collecting work email
    **and** password together (Windows parity), with show/hide on the
    password and a *← Back* link. Format errors appear inline on the same
@@ -205,7 +206,7 @@ bash tests/test-units.sh
 bash tests/test-flow.sh
 ```
 
-- `test-units.sh` — 75 assertions: JSON escaping, email masking, user
+- `test-units.sh` — 78 assertions: JSON escaping, email masking, user
   lookup parsing, 5xx retry, username alignment (case-insensitive
   compare, original case sent), 409-as-success, every failure category,
   the renderer-result parser, the user lookup, and the host's status tokens.

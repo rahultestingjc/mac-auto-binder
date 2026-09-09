@@ -64,11 +64,11 @@ Click through the whole flow without root:
 `UNAVAILABLE`, `CLOSED`.
 
 **Whether it runs at all is decided ONLY by `{{device.primary_user_id}}`:**
-set means already bound, so skip; otherwise prompt. There is no defer, no
-"Remind Me Later" and no completion marker - nothing on disk can suppress
-the prompt or bring it back later. Repeat behaviour is entirely the
-JumpCloud schedule's business.
-
+set means already bound, so skip; otherwise prompt. There is no defer
+window and no completion marker - nothing on disk can suppress the prompt
+or bring it back later. "Remind Me Later" is only a way out of the
+window: it ends the run and writes nothing. Repeat behaviour is entirely
+the JumpCloud schedule's business.
 `CREDENTIALS` is **one screen collecting work email AND password**
 together (Windows parity), owned by `user/ui-host.sh` running as the
 console user. Because root holds the API key, the two exchange
@@ -104,7 +104,7 @@ Root serves that lookup inside `ui_credentials_step` in `lib/ui.sh`
 
 First bring-up on real Mac hardware is done. Both suites are green:
 
-- `tests/test-units.sh` — 75 pass / 0 fail
+- `tests/test-units.sh` — 78 pass / 0 fail
 - `tests/test-flow.sh`  — 34 pass / 0 fail
 - `bash build/build-package.sh` passes (runs both suites + the CR gate)
 
@@ -179,6 +179,16 @@ hand, but the app rejected the same credentials):
     record it picked a NESTED `_id` (from `attributes[]`) instead of the
     user's own. The body is now split on commas first, so each match stays
     inside one field, and `head -n1` takes the first.
+
+11. `lib/config.sh` built the DN as
+    `: "${LDAP_USER_DN_TEMPLATE:=uid={username},ou=Users,...}"`. Inside
+    `${VAR:=word}` the first unescaped `}` ENDS the expansion, so the value
+    was silently the truncated `uid={username` - no closing brace. The
+    host's "must contain {username}" check then failed, so EVERY
+    verification returned CONFIG_ERROR ("we couldn't reach the verification
+    service") and the LDAP bind was never attempted. It is a plain `if`
+    assignment now. Proven end to end against a live tenant: the same
+    account that returned CONFIG_ERROR now binds with exit code 0.
 
 ### Still unverified
 

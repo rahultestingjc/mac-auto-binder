@@ -46,7 +46,12 @@ jc_curl() {
     local __tmp __code __attempt=1
     __tmp="$(mktemp)"
     while (( __attempt <= API_MAX_TRIES )); do
-        __code="$(curl -sS -o "$__tmp" -w '%{http_code}' "$@" || echo "000")"
+        # Bounded: without these a dropped (not refused) connection hangs for
+        # minutes per attempt, root never answers the UI host's
+        # email -> username lookup, and the user sits on "Verifying your
+        # account..." with nothing to show for it.
+        __code="$(curl -sS --connect-timeout 15 --max-time 45 \
+                       -o "$__tmp" -w '%{http_code}' "$@" || echo "000")"
         if [[ "$__code" != "000" ]] && ! [[ "$__code" =~ ^5 ]]; then
             break
         fi

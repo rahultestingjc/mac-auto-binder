@@ -206,7 +206,7 @@ bash tests/test-units.sh
 bash tests/test-flow.sh
 ```
 
-- `test-units.sh` — 89 assertions: JSON escaping, email masking, user
+- `test-units.sh` — 92 assertions: JSON escaping, email masking, user
   lookup parsing, 5xx retry, username alignment (case-insensitive
   compare, original case sent), 409-as-success, every failure category,
   the renderer-result parser, the user lookup, and the host's status tokens.
@@ -214,6 +214,22 @@ bash tests/test-flow.sh
   stubbed macOS commands through the happy path, a dismissed window, invalid email,
   wrong password, LDAP unavailable, binding failure, retry, already
   bound, missing Secure Token and missing `ORG_ID`.
+
+**End to end against a real LDAPS bind** (no sudo, no API key):
+
+```bash
+JC_TEST_EMAIL=user@example.com JC_TEST_PASSWORD='...' ./tests/e2e-local.sh --org <ORG_ID>
+```
+
+Runs the real orchestrator, the real `user/ui-host.sh` and a genuine
+LDAPS bind against JumpCloud, stubbing only the renderer (so nothing has
+to be clicked) and the JumpCloud REST API (so nothing in your tenant
+changes). It checks the happy path, that a wrong password is rejected by
+LDAP rather than by a config error, that binding never runs after an auth
+failure, and that the password reaches no log or IPC file. This is the
+layer the unit and flow suites cannot reach — it is how the truncated DN
+template was caught, where every verification failed without ever
+attempting a bind.
 
 **Review the real screens without root:**
 

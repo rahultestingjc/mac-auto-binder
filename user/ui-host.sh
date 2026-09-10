@@ -227,6 +227,7 @@ do_credentials() {
         return 0
     fi
 
+    log "Credentials accepted; asking root to resolve the username"
     verifying_screen_start
     if [[ -n "${JC_SIMULATE:-}" ]]; then
         log "Simulation active: ${JC_SIMULATE}"
@@ -245,6 +246,7 @@ do_credentials() {
     fi
 
     if ! resolve_username; then
+        log "Username resolution failed or timed out"
         verifying_screen_stop
         PASSWORD=""; unset PASSWORD
         printf 'UNAVAILABLE'
@@ -252,6 +254,7 @@ do_credentials() {
     fi
     # verify_ldap runs in a subshell, which is fine: it only needs to READ
     # the password and print a token.
+    log "Username resolved as '${JC_USERNAME:-<none>}'; starting LDAP bind"
     token="$(verify_ldap)"
     PASSWORD=""; unset PASSWORD
     verifying_screen_stop
@@ -284,7 +287,7 @@ resolve_username() {
 }
 
 verify_ldap() {
-    local dn uri rc tool fifo writer_pid
+    local dn uri rc tool fifo writer_pid ldap_pid watchdog_pid hard
 
     # Unknown email -> same token as a bad password. We deliberately
     # prompted for the password first, so the two are indistinguishable
@@ -337,21 +340,41 @@ verify_ldap() {
         printf 'CONFIG_ERROR'; exit 0
     fi
 
+    log "Binding as ${dn}"
     printf '%s' "$PASSWORD" > "$fifo" &
     writer_pid=$!
 
+    # Every background job below redirects its own stdout. verify_ldap runs
+    # inside $( ), which waits for EOF on that pipe, so a job holding it open
+    # would stall the caller for as long as it lived.
+    #
     # LDAPTLS_REQCERT=demand: a bad/untrusted certificate fails closed.
+    hard=$(( JC_LDAP_TIMEOUT + 15 ))
     if [[ "$tool" == "ldapwhoami" ]]; then
         LDAPTLS_REQCERT=demand ldapwhoami -H "$uri" ${starttls[@]+"${starttls[@]}"} -x \
-            -D "$dn" -y "$fifo" -o nettimeout="${JC_LDAP_TIMEOUT}" >/dev/null 2>&1
-        rc=$?
+            -D "$dn" -y "$fifo" -o nettimeout="${JC_LDAP_TIMEOUT}" >/dev/null 2>&1 &
     else
         LDAPTLS_REQCERT=demand ldapsearch -H "$uri" ${starttls[@]+"${starttls[@]}"} -x \
             -D "$dn" -y "$fifo" -b "$dn" -s base -l "${JC_LDAP_TIMEOUT}" \
-            -o nettimeout="${JC_LDAP_TIMEOUT}" '(objectClass=*)' 1.1 >/dev/null 2>&1
-        rc=$?
+            -o nettimeout="${JC_LDAP_TIMEOUT}" '(objectClass=*)' 1.1 >/dev/null 2>&1 &
     fi
-    wait "$writer_pid" 2>/dev/null || true
+    ldap_pid=$!
+
+    # nettimeout bounds network reads, not a stalled TLS handshake. Without a
+    # hard stop, a wedged bind leaves "Verifying your account..." on screen
+    # for the rest of the session.
+    ( sleep "$hard"; kill -9 "$ldap_pid" 2>/dev/null ) >/dev/null 2>&1 &
+    watchdog_pid=$!
+    wait "$ldap_pid"
+    rc=$?
+    kill "$watchdog_pid" >/dev/null 2>&1
+    wait "$watchdog_pid" 2>/dev/null
+
+    # The writer blocks in open() until the client opens the FIFO. If the
+    # client exited first it would block there forever, so kill it rather than
+    # waiting unconditionally - that wait was an unbounded hang.
+    kill "$writer_pid" >/dev/null 2>&1
+    wait "$writer_pid" 2>/dev/null
 
     PASSWORD=""
     unset PASSWORD

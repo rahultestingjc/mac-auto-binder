@@ -98,13 +98,13 @@ Root serves that lookup inside `ui_credentials_step` in `lib/ui.sh`
   the long-lived renderer; credential screen + LDAPS bind; returns ONLY a
   status token.
 - `build/build-package.sh` — emits `dist/` (zip + MDM-Command.sh + hash).
-- `tests/` — `test-units.sh`, `test-flow.sh`, `dry-run.sh`.
+- `tests/` — `test-units.sh`, `test-flow.sh`, `e2e-local.sh`, `dry-run.sh`.
 
 ## CURRENT STATUS
 
 First bring-up on real Mac hardware is done. Both suites are green:
 
-- `tests/test-units.sh` — 89 pass / 0 fail
+- `tests/test-units.sh` — 92 pass / 0 fail
 - `tests/test-flow.sh`  — 34 pass / 0 fail
 - `bash build/build-package.sh` passes (runs both suites + the CR gate)
 
@@ -190,6 +190,16 @@ hand, but the app rejected the same credentials):
     assignment now. Proven end to end against a live tenant: the same
     account that returned CONFIG_ERROR now binds with exit code 0.
 
+12. Three unbounded waits could pin the flow on "Verifying your account..."
+    for the rest of the session: `jc_curl` ran `curl` with NO
+    `--connect-timeout`/`--max-time`, so a dropped connection hung for
+    minutes an attempt and root never answered the lookup; `verify_ldap`
+    `wait`ed on the FIFO password writer, which blocks in `open()` until the
+    LDAP tool opens it, so a client that exited first left it waiting
+    forever; and nothing bounded the bind itself (`nettimeout` covers
+    network reads, not a stalled TLS handshake). All three are bounded now,
+    and the host logs each phase so a hang names itself in the log.
+
 ### Still unverified
 
 - A real LDAPS bind against JumpCloud (needs a real user's password).
@@ -198,6 +208,16 @@ hand, but the app rejected the same credentials):
   this environment has no Accessibility permission for synthetic input.
 
 ## First runs on this Mac
+
+The whole flow against a REAL LDAPS bind, no sudo and no API key needed -
+this is the test that catches wiring the suites cannot (it is how the
+truncated DN template was found):
+
+```
+JC_TEST_EMAIL=user@example.com JC_TEST_PASSWORD='...' \
+    ./tests/e2e-local.sh --org <ORG_ID>
+```
+
 
 ```
 sudo ./tests/dry-run.sh                                   # simulated LDAP + binding

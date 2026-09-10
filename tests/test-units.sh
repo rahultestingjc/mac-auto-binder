@@ -123,6 +123,18 @@ case "$(mock_last)" in
     *)           assert true  'no fields projection is sent (it broke the reply)' ;;
 esac
 
+# Without timeouts a dropped (not refused) connection hangs for minutes per
+# attempt, so root never answers the host's email -> username lookup and the
+# user sits on "Verifying your account..." with nothing to show for it.
+case "$(mock_last)" in
+    *"--max-time"*) assert true  'API calls are bounded by --max-time' ;;
+    *)              assert false 'API calls are bounded by --max-time' ;;
+esac
+case "$(mock_last)" in
+    *"--connect-timeout"*) assert true  'API calls are bounded by --connect-timeout' ;;
+    *)                     assert false 'API calls are bounded by --connect-timeout' ;;
+esac
+
 # A full record contains nested objects with their own _id. A greedy match
 # across the whole body picks the LAST one; the record's own _id is first.
 mock_full() {
@@ -550,6 +562,27 @@ if grep -q 'hunter2' "$HDIR/host.err" "$HDIR/host.out" 2>/dev/null; then
 else
     assert true 'password never reaches the host log'
 fi
+
+printf '\n--- a client that never reads the password must not hang the host ---\n'
+# The password reaches the LDAP tool through a FIFO, and the writer blocks in
+# open() until the tool opens it. verify_ldap used to `wait` on that writer
+# unconditionally, so a client that exited without reading left the host stuck
+# forever - "Verifying your account..." on screen for the rest of the session.
+cat > "$HDIR/bin/ldapwhoami" <<'STUBEOF'
+#!/bin/bash
+# Exits WITHOUT ever opening the -y password file.
+exit 49
+STUBEOF
+chmod +x "$HDIR/bin/ldapwhoami"
+host_start "" '{"button":0,"fields":{"email":"a@b.io","password":"pw"}}'
+serve_lookup "jdoe" &
+LK=$!
+host_send "CREDENTIALS "
+got="$(host_recv)"
+wait "$LK" 2>/dev/null
+host_stop
+assert_eq "$got" "TOKEN AUTH_FAILED" 'host still answers when the client never reads the FIFO'
+rm -f "$HDIR/bin/ldapwhoami"
 
 # --- the host refuses to start without a renderer ---
 HIPC="$HDIR/ipc.none"; mkdir -p "$HIPC"
